@@ -12,11 +12,12 @@ namespace nvenc {
     full_resolution,  ///< Better overall statistics, slower and uses more extra vram
   };
 
-  enum class split_encode_mode {
+  enum class split_encode_mode_e {
     auto_mode,  ///< Let the NVIDIA driver decide when split-frame encoding should be used
     enabled,  ///< Force split-frame encoding when supported
     disabled,  ///< Disable split-frame encoding even when it would otherwise be auto-enabled
   };
+  using split_encode_mode = split_encode_mode_e;
 
   /**
    * @brief NVENC encoder configuration.
@@ -56,7 +57,7 @@ namespace nvenc {
     bool h264_cavlc = false;
 
     // Control split-frame encoding for supported HEVC/AV1 sessions
-    split_encode_mode split_encode_mode = split_encode_mode::auto_mode;
+    split_encode_mode_e split_encode_mode = split_encode_mode_e::auto_mode;
 
     // Add filler data to encoded frames to stay at target bitrate, mainly for testing
     bool insert_filler_data = false;

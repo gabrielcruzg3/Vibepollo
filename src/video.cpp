@@ -225,7 +225,6 @@ namespace video {
       return false;
     }
 
-#ifdef _WIN32
     bool is_d3d_capture_image(const std::shared_ptr<platf::img_t> &img) {
       return dynamic_cast<platf::dxgi::img_d3d_t *>(img.get()) != nullptr;
     }
@@ -260,7 +259,6 @@ namespace video {
         BOOST_LOG(warning) << "Failed to start async D3D image release thread: " << err.what();
       }
     }
-#endif
 
     std::optional<std::string> active_virtual_display_dxgi_name() {
       auto virtual_displays = VDISPLAY::enumerateVirtualDisplays();
