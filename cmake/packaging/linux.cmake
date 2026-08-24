@@ -66,8 +66,9 @@ endif()
 # https://github.com/coreos/rpm-ostree/discussions/5036#discussioncomment-10291071
 set(CPACK_RPM_USER_FILELIST "%caps(cap_sys_admin,cap_sys_nice+p) ${SUNSHINE_EXECUTABLE_PATH}")
 
-# Dependencies
-set(CPACK_DEB_COMPONENT_INSTALL ON)
+if(NOT DEFINED CPACK_DEB_COMPONENT_INSTALL)
+    set(CPACK_DEB_COMPONENT_INSTALL ON)
+endif()
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             ${CPACK_DEB_PLATFORM_PACKAGE_DEPENDS} \
             debianutils, \
