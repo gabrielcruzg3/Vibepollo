@@ -10,22 +10,25 @@ if(NOT WIN32)
     find_package(PkgConfig QUIET)
     if(PKG_CONFIG_FOUND)
         pkg_check_modules(UDEV "udev")
+        if(NOT UDEV_FOUND)
+            pkg_check_modules(UDEV "libudev")
+        endif()
     endif()
 
-    if(UDEV_FOUND)
-        if(UDEV_VERSION)
-            message(STATUS "Found udev/systemd version: ${UDEV_VERSION}")
-        else()
-            message(WARNING "Could not determine udev/systemd version")
-            set(UDEV_VERSION "0")
+    if(UDEV_FOUND OR EXISTS "/usr/lib/udev" OR EXISTS "/lib/udev")
+        set(UDEV_FOUND TRUE)
+        if(PKG_CONFIG_FOUND)
+            execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE}
+                --variable=udev_dir udev
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                OUTPUT_VARIABLE UDEV_RULES_INSTALL_DIR)
         endif()
 
-        execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE}
-            --variable=udev_dir udev
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            OUTPUT_VARIABLE UDEV_RULES_INSTALL_DIR)
-
-        set(UDEV_RULES_INSTALL_DIR "${UDEV_RULES_INSTALL_DIR}/rules.d")
+        if(UDEV_RULES_INSTALL_DIR)
+            set(UDEV_RULES_INSTALL_DIR "${UDEV_RULES_INSTALL_DIR}/rules.d")
+        else()
+            set(UDEV_RULES_INSTALL_DIR "lib/udev/rules.d")
+        endif()
 
         mark_as_advanced(UDEV_RULES_INSTALL_DIR)
 
