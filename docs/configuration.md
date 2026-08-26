@@ -4450,6 +4450,18 @@ Sets the maximum bitrate, in Kbps, considered by the network pacing policy. Set 
 
 Sets the maximum network packet size used for streaming. Set `0` to use the default behavior.
 
+### remote_monitor_mute_audio
+
+Send picture and input without sending game or desktop audio to the Remote Monitor client.
+
+### remote_monitor_disconnect_on_stream_end
+
+Remove the client's extra monitor when its stream finishes. Leave this off to keep the monitor ready for Resume.
+
+### remote_monitor_disconnect_on_client_disconnect
+
+Remove the extra monitor as soon as the client connection drops or you use Disconnect, even if the monitor was waiting for Resume.
+
 <div class="section_buttons">
 
 | Previous          |                            Next |
