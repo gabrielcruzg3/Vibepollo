@@ -85,6 +85,13 @@ namespace nvhttp {
 
     std::mutex remote_role_owners_mutex;
     std::unordered_map<std::string, remote_role_owner_t> remote_role_owners;
+
+    std::uint64_t active_session_generation(const proc::active_session_guard_t &session) {
+      if (!session.has_active_app) return 0;
+      const auto ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(session.launch_started_at.time_since_epoch()).count();
+      return ticks > 0 ? static_cast<std::uint64_t>(ticks) : 0;
+    }
+
     std::mutex remote_http_control_transition_mutex;
 
     std::string remote_role_owner_key(std::string_view uuid, remote_session::role_e role) {
@@ -459,33 +466,6 @@ namespace nvhttp {
       );
     }
 
-    void wait_for_probe_helper_settle(
-      const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session,
-      const std::chrono::steady_clock::time_point deadline
-    ) {
-      if (!launch_session->display_helper_gate.valid()) {
-        return;
-      }
-      if (launch_session->display_helper_gate.wait_until(deadline) != std::future_status::ready) {
-        BOOST_LOG(warning) << "Display-helper verification did not finish before encoder probing; proceeding on the selected adapter.";
-        return;
-      }
-
-      try {
-        const auto status = launch_session->display_helper_gate.get();
-        if (status == rtsp_stream::launch_session_t::display_helper_gate_status_e::abort_failed) {
-          BOOST_LOG(warning) << "Display-helper verification failed; proceeding with GPU capability probing.";
-        } else if (status == rtsp_stream::launch_session_t::display_helper_gate_status_e::proceed_gaveup) {
-          BOOST_LOG(warning) << "Display-helper verification was inconclusive; proceeding with GPU capability probing.";
-        }
-      } catch (const std::exception &e) {
-        BOOST_LOG(warning) << "Display-helper verification wait failed (" << e.what() << "); proceeding with GPU capability probing.";
-      } catch (...) {
-        BOOST_LOG(warning) << "Display-helper verification wait failed; proceeding with GPU capability probing.";
-      }
-    }
-
-    bool has_stream_session_activity();
     bool has_active_or_stopping_stream_session();
 
     http_encoder_capabilities_t advertised_encoder_capabilities_for_http() {
@@ -554,25 +534,16 @@ namespace nvhttp {
         return publish(std::move(caps), false, "active-or-stopping-session");
       }
 
-#ifdef _WIN32
-      // Startup probing already waits for the interactive desktop. Keep idle
-      // HTTP discovery on the same side of that boundary so a pre-login
-      // request cannot create a probe display that Windows cannot enumerate.
-      // Stream-initiated probing remains independent of this gate.
-      if (!platf::is_default_input_desktop_active()) {
-        BOOST_LOG(info) << "HTTP encoder capability probe deferred until the interactive desktop is ready.";
-        return publish(std::move(caps), false, "interactive-desktop");
-      }
-#endif
-
       auto ensure_result = VDISPLAY::ensure_display(idle_virtual_required_adapter);
       auto cleanup_probe_display = util::fail_guard([&ensure_result]() {
         VDISPLAY::cleanup_ensure_display(ensure_result);
       });
-      if (!ensure_result.ready_for_probe()) {
+      if (idle_virtual_required_adapter && !ensure_result.owns_temporary_probe_request()) {
+        BOOST_LOG(warning)
+          << "HTTP capability discovery could not acquire a temporary-display lease; continuing with exact-adapter synthetic validation.";
+      } else if (ensure_result.owns_temporary_probe_request() && !ensure_result.ready_for_capture()) {
         BOOST_LOG(info)
-          << "HTTP encoder capability probe deferred: the exact retained display target is not ready.";
-        return publish(std::move(caps), false, "target-pending");
+          << "HTTP capability discovery is probing synthetic surfaces before the temporary display is published.";
       }
       caps = video::advertised_encoder_capabilities(true, &probe_complete);
       return publish(std::move(caps), probe_complete, "idle-probe");
@@ -804,7 +775,7 @@ namespace nvhttp {
         const remote_display_topology::mode_t mode {
           .width = launch_session->width,
           .height = launch_session->height,
-          .refresh_hz = launch_session->fps,
+          .refresh_hz = remote_session::display_refresh_hz_from_session_fps(launch_session->fps),
         };
         const auto reservation = remote_display_topology::instance().reserve_normal_game_identity(
           launch_session->client_uuid,
@@ -3414,6 +3385,7 @@ namespace nvhttp {
         const remote_session::game_t game {
           .running = current_appid > 0,
           .owner_uuid = active_session.client_uuid,
+          .generation = active_session_generation(active_session),
           .app = current_app ? remote_session::app_t {static_cast<std::int32_t>(util::from_view(current_app->id)), current_app->uuid, current_app->name, false} : remote_session::app_t {},
         };
         const auto projection = remote_session::project(caller, game, remote_owner_for_client(identity.uuid), remote_configured_apps);
@@ -3451,7 +3423,7 @@ namespace nvhttp {
           app_node.put("UUID", entry.uuid);
           app_node.put("IDX", configured == configured_apps.end() ? "0" : configured->idx);
           app_node.put("ID", entry.id);
-          app_node.put("ArtVersion", entry.synthetic ? "remote-session-v5" : (configured == configured_apps.end() ? "" : configured->art_version));
+          app_node.put("ArtVersion", entry.synthetic ? "remote-session-v6" : (configured == configured_apps.end() ? "" : configured->art_version));
 
           apps.push_back(std::make_pair("App", std::move(app_node)));
         }
@@ -3536,6 +3508,7 @@ namespace nvhttp {
         const remote_session::game_t game {
           .running = current_appid > 0,
           .owner_uuid = active_session.client_uuid,
+          .generation = active_session_generation(active_session),
           .app = active_app ? remote_session::app_t {static_cast<std::int32_t>(util::from_view(active_app->id)), active_app->uuid, active_app->name, false} : remote_session::app_t {},
         };
         const remote_session::caller_t caller {
@@ -3558,18 +3531,28 @@ namespace nvhttp {
           resume(host_audio, std::move(response), std::move(request), current_appid, false, true);
           return;
         }
-        if (decision.disconnect_game) {
+        if (decision.terminate) {
+          if (remote_session::arm_or_confirm_termination(request_client_identity.uuid, game.generation, game.app.id) == remote_session::terminate_confirmation_e::prompt) {
+            tree.put("root.resume", 0);
+            tree.put("root.gamesession", 0);
+            tree.put("root.<xmlattr>.status_code", 410);
+            tree.put("root.<xmlattr>.status_message", std::string {remote_session::termination_confirmation_message()});
+            return;
+          }
           const bool disconnected = rtsp_stream::disconnect_game_sessions(true);
+          // Role-scoped transport teardown deliberately preserves Remote Monitor
+          // and Remote Input, but it does not end the configured application.
+          // Complete the same process/session lifecycle as /cancel while
+          // transferring the stream-lifecycle lock already held by /launch.
+          proc::proc.terminate(false, true);
           tree.put("root.resume", 0);
           tree.put("root.gamesession", 0);
-          if (disconnected) {
-            const auto completion = *remote_session::successful_control_completion(synthetic_control);
-            tree.put("root.<xmlattr>.status_code", completion.status_code);
-            tree.put("root.<xmlattr>.status_message", std::string {completion.status_message});
-          } else {
-            tree.put("root.<xmlattr>.status_code", 409);
-            tree.put("root.<xmlattr>.status_message", "The active configured-game stream is no longer connected");
+          if (!disconnected) {
+            BOOST_LOG(info) << "Terminate found no active game transport; closed the paused configured application lifecycle.";
           }
+          const auto completion = *remote_session::successful_control_completion(synthetic_control);
+          tree.put("root.<xmlattr>.status_code", completion.status_code);
+          tree.put("root.<xmlattr>.status_message", std::string {completion.status_message});
           return;
         }
         if (synthetic_control == remote_session::control_e::disconnect_input ||
@@ -3646,7 +3629,11 @@ namespace nvhttp {
           launch_session->client_undo_cmds.clear();
         }
         if (launch_session->role == remote_session::role_e::monitor) {
-          const auto mode = std::format("{}x{}@{}", launch_session->width, launch_session->height, launch_session->fps);
+          const auto mode = remote_session::monitor_mode_from_session_fps(
+            launch_session->width,
+            launch_session->height,
+            launch_session->fps
+          );
           const auto monitor = remote_session::activate_or_resume_monitor(request_client_identity.uuid, request_client_identity.name, mode, launch_session->role_generation);
           if (monitor.accepted) {
             remember_remote_owner(request_client_identity.uuid, launch_session->role, launch_session->role_generation);
@@ -4001,27 +3988,21 @@ namespace nvhttp {
 
 #ifdef _WIN32
       bool encoder_probe_failed = false;
-      bool probe_display_unavailable = false;
       if (!video::has_successful_encoder_probe()) {
         {
           VDISPLAY::ensure_display_result ensure_result {};
           auto cleanup_probe_display = util::fail_guard([&ensure_result]() {
             VDISPLAY::cleanup_ensure_display(ensure_result);
           });
-          if (!VDISPLAY::policy::should_ensure_probe_display(launch_session->virtual_display)) {
-            // Let APPLY settle when possible, but capability probing remains
-            // adapter-scoped and does not turn a soft display gate into a 503.
-            wait_for_probe_helper_settle(launch_session, display_startup_deadline);
-          } else {
+          if (VDISPLAY::policy::should_ensure_probe_display(launch_session->virtual_display)) {
             ensure_result = VDISPLAY::ensure_display();
-            probe_display_unavailable = !ensure_result.ready_for_probe();
+            if (!ensure_result.owns_temporary_probe_request() && !ensure_result.ready_for_capture()) {
+              BOOST_LOG(warning)
+                << "Launch could not acquire a temporary-display lease; continuing with synthetic encoder validation.";
+            }
           }
 
-          if (!probe_display_unavailable) {
-            encoder_probe_failed = video::probe_encoders();
-          } else {
-            encoder_probe_failed = true;
-          }
+          encoder_probe_failed = video::probe_encoders();
         }
       } else {
         BOOST_LOG(debug) << "Launch encoder probe skipped (matching selected-GPU cache).";
@@ -4031,12 +4012,7 @@ namespace nvhttp {
 #endif
 
       if (encoder_probe_failed && !is_input_only) {
-        const std::string status_message =
-#ifdef _WIN32
-          probe_display_unavailable ?
-            "No usable display is available on the selected capture adapter." :
-#endif
-            "Failed to initialize video capture/encoding. Is a display connected and turned on?";
+        const std::string status_message = "Failed to initialize a video encoder on the selected adapter.";
         BOOST_LOG(error) << status_message;
         tree.put("root.<xmlattr>.status_code", 503);
         tree.put("root.<xmlattr>.status_message", status_message);
@@ -4539,25 +4515,21 @@ namespace nvhttp {
       // or any number of other factors).
 #ifdef _WIN32
       bool encoder_probe_failed = false;
-      bool probe_display_unavailable = false;
       if (!video::has_successful_encoder_probe()) {
         {
           VDISPLAY::ensure_display_result ensure_result {};
           auto cleanup_probe_display = util::fail_guard([&ensure_result]() {
             VDISPLAY::cleanup_ensure_display(ensure_result);
           });
-          if (!VDISPLAY::policy::should_ensure_probe_display(launch_session->virtual_display)) {
-            wait_for_probe_helper_settle(launch_session, display_startup_deadline);
-          } else {
+          if (VDISPLAY::policy::should_ensure_probe_display(launch_session->virtual_display)) {
             ensure_result = VDISPLAY::ensure_display();
-            probe_display_unavailable = !ensure_result.ready_for_probe();
+            if (!ensure_result.owns_temporary_probe_request() && !ensure_result.ready_for_capture()) {
+              BOOST_LOG(warning)
+                << "Resume could not acquire a temporary-display lease; continuing with synthetic encoder validation.";
+            }
           }
 
-          if (!probe_display_unavailable) {
-            encoder_probe_failed = video::probe_encoders();
-          } else {
-            encoder_probe_failed = true;
-          }
+          encoder_probe_failed = video::probe_encoders();
         }
       } else {
         BOOST_LOG(debug) << "Resume encoder probe skipped (matching selected-GPU cache).";
@@ -4567,12 +4539,7 @@ namespace nvhttp {
 #endif
 
       if (encoder_probe_failed && !launch_session->input_only) {
-        const std::string status_message =
-#ifdef _WIN32
-          probe_display_unavailable ?
-            "No usable display is available on the selected capture adapter." :
-#endif
-            "Failed to initialize video capture/encoding. Is a display connected and turned on?";
+        const std::string status_message = "Failed to initialize a video encoder on the selected adapter.";
         tree.put("root.resume", 0);
         tree.put("root.<xmlattr>.status_code", 503);
         tree.put("root.<xmlattr>.status_message", status_message);
