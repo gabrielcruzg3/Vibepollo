@@ -4,9 +4,10 @@
 
 - **Repository**: [gabrielcruzg3/Vibepollo](https://github.com/gabrielcruzg3/Vibepollo) (Fork of [Nonary/Vibepollo](https://github.com/Nonary/Vibepollo))
 - **Active Branch**: `dev/agy` (tracks `origin/dev/agy`)
-- **Current Version**: `1.19.0-beta.2-agy` (Upstream baseline: `1.19.0-beta.2`)
-- **Draft Release on GitHub**: [`1.19.0-beta.2-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases)
+- **Current Version**: `1.19.0-beta.3-agy` (Upstream baseline: `1.19.0-beta.3` — **Latest Upstream Release**)
+- **Draft Release on GitHub**: [`1.19.0-beta.3-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases)
 - **Published Releases**:
+  - [`1.19.0-beta.2-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-beta.2-agy) (Upstream `1.19.0-beta.2`)
   - [`1.19.0-beta.1-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-beta.1-agy) (Upstream `1.19.0-beta.1`)
   - [`1.19.0-alpha.2-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-alpha.2-agy) (Upstream `1.19.0-alpha.2`)
   - [`1.19.0-alpha.1-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-alpha.1-agy) (Upstream `1.19.0-alpha.1`)
@@ -26,8 +27,8 @@ Our fork follows upstream release tags step-by-step using the naming convention 
 | `1.19.0-alpha.1-agy` | `1.19.0-alpha.1` | Clean Merge + Locale Contract Fix | 36/36 Passed (100%) | **Published** |
 | `1.19.0-alpha.2-agy` | `1.19.0-alpha.2` | Clean Merge | 36/36 Passed (100%) | **Published** |
 | `1.19.0-beta.1-agy` | `1.19.0-beta.1` | Clean Merge + Config Catalog Mapping | 36/36 Passed (100%) | **Published** |
-| **`1.19.0-beta.2-agy`** | **`1.19.0-beta.2`** | **Clean Merge + Linux Lossless Header Fix + Config Catalog Mapping** | **36/36 Passed (100%)** | **Draft / Ready for Testing** |
-| *Next*: `1.19.0-beta.3-agy` | `1.19.0-beta.3` | *Pending* | - | - |
+| `1.19.0-beta.2-agy` | `1.19.0-beta.2` | Clean Merge + Linux Lossless Header Fix + Config Catalog Mapping | 36/36 Passed (100%) | **Published** |
+| **`1.19.0-beta.3-agy`** | **`1.19.0-beta.3`** | **Clean Merge (Latest Upstream Tag Reached!)** | **36/36 Passed (100%)** | **Draft / Ready for Testing** |
 
 ---
 
@@ -35,7 +36,7 @@ Our fork follows upstream release tags step-by-step using the naming convention 
 
 | Modified File | Root Cause & Issue | Resolution Applied |
 |---|---|---|
-| [src/process.cpp](file:///home/g3/Vibepollo/src/process.cpp#L70-L75) | In `1.19.0-beta.2`, upstream called `playnite_launcher::lossless::policy::should_enable_runtime` in `src/process.cpp` cross-platform, but the `#include "tools/playnite_launcher/lossless_scaling_policy.h"` was guarded inside `#ifdef _WIN32`. | Moved `#include "tools/playnite_launcher/lossless_scaling_policy.h"` outside `#ifdef _WIN32` so Linux builds resolve the policy function cleanly. |
+| [src/process.cpp](file:///home/g3/Vibepollo/src/process.cpp#L70-L75) | In `1.19.0-beta.2`, upstream called `playnite_launcher::lossless::policy::should_enable_runtime` in `src/process.cpp` cross-platform, but `#include "tools/playnite_launcher/lossless_scaling_policy.h"` was guarded inside `#ifdef _WIN32`. | Moved `#include "tools/playnite_launcher/lossless_scaling_policy.h"` outside `#ifdef _WIN32` so Linux builds resolve the policy function cleanly. |
 | [docs/configuration.md](file:///home/g3/Vibepollo/docs/configuration.md) & [en.json](file:///home/g3/Vibepollo/src_assets/common/assets/web/public/assets/locale/en.json) | In `1.19.0-beta.2`, upstream added `remote_monitor_terminate_on_first_request` to `src/config.cpp` and `ui/en.json`, but omitted it from `docs/configuration.md` and the `config` dictionary in `en.json`. | Documented `remote_monitor_terminate_on_first_request` in `docs/configuration.md` and added label to `en.json`. |
 | [docs/configuration.md](file:///home/g3/Vibepollo/docs/configuration.md) & [en.json](file:///home/g3/Vibepollo/src_assets/common/assets/web/public/assets/locale/en.json) | In `1.19.0-beta.1`, upstream added `remote_monitor_mute_audio`, `remote_monitor_disconnect_on_stream_end`, and `remote_monitor_disconnect_on_client_disconnect` to `src/config.cpp` and `ui/en.json`, but omitted them from `docs/configuration.md` and the `config` dictionary in `en.json`. | Documented all three options in `docs/configuration.md` and added their labels to `en.json`, passing `test_component_resource_config_catalog` (36/36 tests passing). |
 | [src_assets/.../en.json](file:///home/g3/Vibepollo/src_assets/common/assets/web/public/assets/locale/en.json#L946-L950) | In `1.19.0-alpha.1`, upstream added `rtss_allow_virtual_display_override` to `src/config.cpp` and `ui/en.json`, but omitted it from the `config` dictionary in `en.json`. | Added `"rtss_allow_virtual_display_override": "Allow non-Reflex RTSS modes on virtual displays"` under `"config"` in `en.json`. |
@@ -62,7 +63,7 @@ From `/home/g3/Vibepollo`:
 export PATH="/usr/local/cuda-13.1/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 export CC=gcc-14
 export CXX=g++-14
-export BUILD_VERSION=1.19.0-beta.2-agy
+export BUILD_VERSION=1.19.0-beta.3-agy
 
 cmake -B build -G Ninja -S . \
   -DBUILD_TESTS=ON \
@@ -102,32 +103,32 @@ mkdir -p build/cpack_artifacts
 # Generate standalone (all-in-one) package
 cmake -B build -DCPACK_DEB_COMPONENT_INSTALL=OFF
 cpack -G DEB --config build/CPackConfig.cmake
-mv build/cpack_artifacts/Vibepollo.deb build/cpack_artifacts/Vibepollo-standalone-1.19.0-beta.2-agy.deb
+mv build/cpack_artifacts/Vibepollo.deb build/cpack_artifacts/Vibepollo-standalone-1.19.0-beta.3-agy.deb
 
 # Generate split packages (core & web assets separately)
 cmake -B build -DCPACK_DEB_COMPONENT_INSTALL=ON
 cpack -G DEB --config build/CPackConfig.cmake
-mv build/cpack_artifacts/Vibepollo-Unspecified.deb build/cpack_artifacts/Vibepollo-core-1.19.0-beta.2-agy.deb
-mv build/cpack_artifacts/Vibepollo-assets.deb build/cpack_artifacts/Vibepollo-web-1.19.0-beta.2-agy.deb
+mv build/cpack_artifacts/Vibepollo-Unspecified.deb build/cpack_artifacts/Vibepollo-core-1.19.0-beta.3-agy.deb
+mv build/cpack_artifacts/Vibepollo-assets.deb build/cpack_artifacts/Vibepollo-web-1.19.0-beta.3-agy.deb
 ```
 
 ---
 
-## 5. Generated Release Packages (`1.19.0-beta.2-agy`)
+## 5. Generated Release Packages (`1.19.0-beta.3-agy`)
 
 Located in `build/cpack_artifacts/`:
 
 | Artifact Name | Size | Contents |
 |---|---|---|
-| **`Vibepollo-standalone-1.19.0-beta.2-agy.deb`** | `19.8 MB` | Complete standalone installer containing core binary (`sunshine-1.19.0-beta.2-agy`), Web UI assets, systemd units, icons, and shaders. |
-| **`Vibepollo-core-1.19.0-beta.2-agy.deb`** | `14.8 MB` | Backend executable and system integration only (no Web UI assets). |
-| **`Vibepollo-web-1.19.0-beta.2-agy.deb`** | `5.0 MB` | Frontend Web UI assets only (`/usr/share/sunshine/web/`). |
+| **`Vibepollo-standalone-1.19.0-beta.3-agy.deb`** | `19.8 MB` | Complete standalone installer containing core binary (`sunshine-1.19.0-beta.3-agy`), Web UI assets, systemd units, icons, and shaders. |
+| **`Vibepollo-core-1.19.0-beta.3-agy.deb`** | `14.8 MB` | Backend executable and system integration only (no Web UI assets). |
+| **`Vibepollo-web-1.19.0-beta.3-agy.deb`** | `5.0 MB` | Frontend Web UI assets only (`/usr/share/sunshine/web/`). |
 
 ### Publishing Draft Release (When Ready)
 A draft release is staged on GitHub:
 ```bash
 # To publish the draft release after testing:
-gh release edit 1.19.0-beta.2-agy --draft=false --repo gabrielcruzg3/Vibepollo
+gh release edit 1.19.0-beta.3-agy --draft=false --repo gabrielcruzg3/Vibepollo
 ```
 
 ---
