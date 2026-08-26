@@ -955,6 +955,7 @@
     "remote_monitor_mute_audio": "Mute audio on Remote Monitor",
     "remote_monitor_disconnect_on_stream_end": "Remove it when the Remote Monitor stream ends",
     "remote_monitor_disconnect_on_client_disconnect": "Remove it when the client disconnects",
+    "remote_monitor_terminate_on_first_request": "Terminate on the first request",
     "vibepollo_file_state": "Vibepollo state file",
     "virtual_display_layout": "Virtual display layout",
     "virtual_display_mode": "Virtual display mode",

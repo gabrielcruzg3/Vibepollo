@@ -4462,6 +4462,10 @@ Remove the client's extra monitor when its stream finishes. Leave this off to ke
 
 Remove the extra monitor as soon as the client connection drops or you use Disconnect, even if the monitor was waiting for Resume.
 
+### remote_monitor_terminate_on_first_request
+
+Allow Moonlight to terminate the running session on the first request without confirmation.
+
 <div class="section_buttons">
 
 | Previous          |                            Next |

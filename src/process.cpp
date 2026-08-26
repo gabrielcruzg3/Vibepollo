@@ -68,10 +68,10 @@
   #include "platform/windows/virtual_display_cleanup.h"
   #include "tools/playnite_launcher/focus_utils.h"
   #include "tools/playnite_launcher/lossless_scaling.h"
-  #include "tools/playnite_launcher/lossless_scaling_policy.h"
 
   #include <Psapi.h>
 #endif
+#include "tools/playnite_launcher/lossless_scaling_policy.h"
 #include "httpcommon.h"
 #include "nvhttp.h"
 #include "process.h"
