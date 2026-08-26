@@ -374,6 +374,57 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @note{This option applies to FreeBSD and Linux only.}</td>
     </tr>
     <tr>
+        <td>vhf</td>
+        <td>Vibepollo's own virtual gamepad driver, instead of ViGEmBus, choosing the controller
+            automatically
+            @note{This option applies to Windows only and requires the Vibepollo virtual gamepad
+            driver to be installed. It presents a DualSense to clients that report a PlayStation
+            controller, or when motion_as_ds4 or touchpad_as_ds4 applies, and an Xbox Series
+            controller otherwise. On an older driver it falls back to a generic HID pad that
+            publishes the DirectInput Physical Interface Device report set, so force feedback still
+            works in DirectInput games.}</td>
+    </tr>
+    <tr>
+        <td>vhf_switch</td>
+        <td>Switch Pro Controller on Vibepollo's own virtual gamepad driver
+            @note{This option applies to Windows only and requires the Vibepollo virtual gamepad
+            driver to be installed. Includes motion sensors, battery reporting, rumble, and the
+            Capture button. This controller has no analog triggers, so trigger travel is reported
+            as ZL and ZR presses, and it has no touchpad.}</td>
+    </tr>
+    <tr>
+        <td>vhf_xbox</td>
+        <td>Xbox Series controller on Vibepollo's own virtual gamepad driver
+            @note{This option applies to Windows only and requires the Vibepollo virtual gamepad
+            driver to be installed. Along with vhf_xbox_one, this is a virtual gamepad option
+            Windows places on the XInput path, so it is one of the two that games supporting only
+            XInput can see. It has rumble and impulse triggers, but no touchpad, motion, or
+            battery reporting.}</td>
+    </tr>
+    <tr>
+        <td>vhf_xbox_one</td>
+        <td>Xbox One controller on Vibepollo's own virtual gamepad driver
+            @note{This option applies to Windows only and requires the Vibepollo virtual gamepad
+            driver to be installed. It reaches the XInput path the same way vhf_xbox does, and is
+            recognised by Windows on its own product ID rather than a generic one, which can help
+            with software that identifies controllers by generation. It is otherwise identical to
+            vhf_xbox except that an Xbox One pad has no Share button.}</td>
+    </tr>
+    <tr>
+        <td>vhf_ds4</td>
+        <td>DualShock 4 on Vibepollo's own virtual gamepad driver
+            @note{This option applies to Windows only and requires the Vibepollo virtual gamepad
+            driver to be installed. Includes the touchpad, motion sensors, battery reporting, and
+            the lightbar.}</td>
+    </tr>
+    <tr>
+        <td>vhf_ds5</td>
+        <td>DualSense on Vibepollo's own virtual gamepad driver
+            @note{This option applies to Windows only and requires the Vibepollo virtual gamepad
+            driver to be installed. Includes the touchpad, motion sensors, battery reporting, the
+            lightbar, the player and microphone LEDs, and the adaptive triggers.}</td>
+    </tr>
+    <tr>
         <td>x360</td>
         <td>Xbox 360 controller
             @note{This option applies to Windows only.}</td>
@@ -912,7 +963,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
             <br>
             **FreeBSD/Linux + VA-API:**
             <br>
-            Unlike with *amdvce* and *nvenc*, it doesn't matter if video encoding is done on a different GPU.
+            Unlike with AMD AMF encoders and *nvenc*, it doesn't matter if video encoding is done on a different GPU.
             @code{}
             ls /dev/dri/renderD*  # to find all devices capable of VAAPI
             # replace ``renderD129`` with the device from above to list the name and capabilities of the device
@@ -2667,13 +2718,19 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>For Intel graphics cards</td>
     </tr>
     <tr>
-        <td>amdvce</td>
-        <td>For AMD graphics cards (native AMF encoder)</td>
+        <td>amdvce_ffmpeg</td>
+        <td>For AMD graphics cards. This is the supported FFmpeg-based AMF encoder and the
+            implementation used by automatic selection on Windows.
+            @note{Existing configurations using @code{}amdvce_legacy@endcode are accepted as
+            a compatibility alias for @code{}amdvce_ffmpeg@endcode. The former native
+            @code{}amdvce@endcode value is accepted as an alias for
+            @code{}amdvce_experimental@endcode.}</td>
     </tr>
     <tr>
-        <td>amdvce_legacy</td>
-        <td>Explicit rollback to the FFmpeg-based AMD AMF encoder. Never selected automatically —
-            automatic probing and `amdvce` fail closed instead of silently falling back.
+        <td>amdvce_experimental</td>
+        <td>Experimental native AMD AMF encoder. It is not selected automatically, has limited
+            hardware test coverage, and may not work with older GPUs or driver versions. Explicit
+            selection fails closed instead of silently changing encoder implementations.
             @note{Applies to Windows only.}</td>
     </tr>
     <tr>
@@ -3386,9 +3443,9 @@ They appear in the Frame Limiter section of the settings UI.
 or newer, which reports AMF 1.4.32. FFmpeg refuses 10-bit P010 surfaces on any older runtime, so HDR
 is not offered to clients even though Vibepollo's own AMF check only needs 1.4.23. Update your
 graphics drivers if HDR is unavailable on an AMD GPU. This limitation applies to the
-@code{amdvce_legacy} rollback encoder only; the native @code{amdvce} encoder talks to AMF directly
-and is not subject to FFmpeg's 10-bit refusal. Vibepollo carries one narrow exception for the legacy
-encoder: on a Radeon Pro 5500 XT (PCI @code{1002:7340}) running AMF 1.4.31.x, it presents 1.4.32 to
+@code{amdvce_ffmpeg} encoder only; the experimental native @code{amdvce_experimental} encoder talks to AMF
+directly and is not subject to FFmpeg's 10-bit refusal. Vibepollo carries one narrow exception for the
+FFmpeg-based encoder: on a Radeon Pro 5500 XT (PCI @code{1002:7340}) running AMF 1.4.31.x, it presents 1.4.32 to
 FFmpeg for the duration of codec validation so HEVC Main10 is not refused. The exception is applied
 automatically, has no configuration option, and does not apply to any other adapter. The detected AMF
 runtime version is written to the log on every AMD HDR HEVC attempt (search for
@@ -3401,7 +3458,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td>Description</td>
         <td colspan="2">
             The encoder usage profile is used to set the base set of encoding parameters.
-            @note{This option only applies when using amdvce [encoder](#encoder).}
+            @note{This option applies to the AMD [encoders](#encoder).}
             @note{The other AMF options that follow will override a subset of the settings applied by your usage
             profile, but there are hidden parameters set in usage profiles that cannot be overridden elsewhere.}
         </td>
@@ -3448,7 +3505,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td>Description</td>
         <td colspan="2">
             The encoder rate control.
-            @note{This option only applies when using amdvce [encoder](#encoder).}
+            @note{This option applies to the AMD [encoders](#encoder).}
             @warning{The `vbr_latency` option generally works best, but some bitrate overshoots may still occur.
             Enabling HRD allows all bitrate based rate controls to better constrain peak bitrate, but may result in
             encoding artifacts depending on your card.}
@@ -3505,7 +3562,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td colspan="2">
             The target quality level used by the `qvbr` rate control method, where 1 is the lowest quality and 51
             is the highest. Higher values spend more bits to preserve quality.
-            @note{This option only applies to AMD [encoders](#encoder) with `amd_rc` set to `qvbr`. Native `amdvce` automatically enables PreAnalysis with a one-frame low-latency lookahead for `qvbr`, `hqvbr`, and `hqcbr`.}
+            @note{This option only applies to AMD [encoders](#encoder) with `amd_rc` set to `qvbr`. Native `amdvce_experimental` automatically enables PreAnalysis with a one-frame low-latency lookahead for `qvbr`, `hqvbr`, and `hqcbr`.}
             @note{Leave this at `0` to keep the encoder default.}
         </td>
     </tr>
@@ -3534,7 +3591,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td>Description</td>
         <td colspan="2">
             Enable Hypothetical Reference Decoder (HRD) enforcement to help constrain the target bitrate.
-            @note{This option only applies when using amdvce [encoder](#encoder).}
+            @note{This option applies to the AMD [encoders](#encoder).}
             @warning{HRD is known to cause encoding artifacts or negatively affect encoding quality on certain cards.}
         </td>
     </tr>
@@ -3560,7 +3617,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td colspan="2">
             The quality profile controls the tradeoff between speed and quality of encoding.
             `auto` leaves the quality property unset so the selected AMF usage preset can choose it.
-            @note{This option only applies when using amdvce [encoder](#encoder).}
+            @note{This option applies to the AMD [encoders](#encoder).}
         </td>
     </tr>
     <tr>
@@ -3600,9 +3657,9 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Preanalysis can increase encoding quality at the cost of latency. Native `amdvce` uses a one-frame
+            Preanalysis can increase encoding quality at the cost of latency. Native `amdvce_experimental` uses a one-frame
             low-latency lookahead; it is enabled automatically by `qvbr`, `hqvbr`, and `hqcbr`. The setting is
-            also forwarded to `amdvce_legacy`.
+            also forwarded to `amdvce_ffmpeg`.
         </td>
     </tr>
     <tr>
@@ -3629,7 +3686,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
             allocation of more bits to smooth areas compared to more textured areas.
             `auto` leaves the property unset so the selected AMF usage preset can choose it. VBAQ is enabled
             by default.
-            @note{This option only applies when using amdvce [encoder](#encoder).}
+            @note{This option applies to the AMD [encoders](#encoder).}
         </td>
     </tr>
     <tr>
@@ -3666,8 +3723,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td>Description</td>
         <td colspan="2">
             The entropy encoding to use.
-            @note{This option only applies when using H.264 with the amdvce
-            [encoder](#encoder).}
+            @note{This option only applies when using H.264 with an AMD [encoder](#encoder).}
         </td>
     </tr>
     <tr>
@@ -3705,7 +3761,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td colspan="2">
             Enable AV1 screen-content coding tools, which can improve efficiency and text/UI clarity for desktop and
             screen-heavy content.
-            @note{AV1 only. This option only applies to the native amdvce [encoder](#encoder) (not amdvce_legacy).}
+            @note{AV1 only. This option only applies to the native amdvce_experimental [encoder](#encoder) (not amdvce_ffmpeg).}
             @note{Leave at `auto` to use the driver default.}
         </td>
     </tr>
@@ -3743,7 +3799,7 @@ runtime version is written to the log on every AMD HDR HEVC attempt (search for
         <td>Description</td>
         <td colspan="2">
             AV1 encoding-latency tier. Lower tiers finish each frame faster at the cost of higher power draw.
-            @note{AV1 only. This option only applies to the native amdvce [encoder](#encoder) (not amdvce_legacy).}
+            @note{AV1 only. This option only applies to the native amdvce_experimental [encoder](#encoder) (not amdvce_ffmpeg).}
             @note{Leave at `auto` to use the driver default.}
         </td>
     </tr>
@@ -4232,23 +4288,23 @@ playnite_exclude_categories = ["Steam", {"id": "deck", "name": "Steam Deck"}]
 
 ### amd_ltr_frames
 
-Sets the number of long-term reference frames used by the native AMD encoder. Leave this at the automatic default unless a client or driver-specific recovery workflow requires a fixed value.
+Sets the number of long-term reference frames used by the experimental native AMD encoder. Leave this at the automatic default unless a client or driver-specific recovery workflow requires a fixed value.
 
 ### amd_input_queue_size
 
-Sets the native AMD encoder input queue depth. A positive explicit value overrides automatic low-latency queue selection.
+Sets the experimental native AMD encoder input queue depth. A positive explicit value overrides automatic low-latency queue selection.
 
 ### amd_smart_access_video
 
-Controls AMD SmartAccess Video when the installed AMF runtime exposes that capability. Use `auto` to leave the driver default unchanged.
+Controls SmartAccess Video for the experimental native AMD encoder when the installed AMF runtime exposes that capability. Use `auto` to leave the driver default unchanged.
 
 ### amd_lowlatency_mode
 
-Controls AMD's native encoder low-latency mode. Use `auto` to leave the driver default unchanged.
+Controls the experimental native AMD encoder's low-latency mode. Use `auto` to leave the driver default unchanged.
 
 ### amd_high_motion_quality_boost
 
-Controls AMD's high-motion quality boost. Use `auto` to leave the driver default unchanged.
+Controls high-motion quality boost for the experimental native AMD encoder. Use `auto` to leave the driver default unchanged.
 
 ### dd_paused_virtual_display_timeout_secs
 

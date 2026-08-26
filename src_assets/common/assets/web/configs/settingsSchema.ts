@@ -355,6 +355,24 @@ const virtualDisplayCustomizationFields = (): SettingsField[] => [
   }),
 ];
 
+const remoteMonitorFields = (): SettingsField[] => [
+  boolean('remote_monitor_mute_audio', {
+    labelKey: 'ui.settings.fields.remote_monitor_mute_audio.label',
+    descriptionKey: 'ui.settings.fields.remote_monitor_mute_audio.description',
+    platform: 'windows',
+  }),
+  boolean('remote_monitor_disconnect_on_stream_end', {
+    labelKey: 'ui.settings.fields.remote_monitor_disconnect_on_stream_end.label',
+    descriptionKey: 'ui.settings.fields.remote_monitor_disconnect_on_stream_end.description',
+    platform: 'windows',
+  }),
+  boolean('remote_monitor_disconnect_on_client_disconnect', {
+    labelKey: 'ui.settings.fields.remote_monitor_disconnect_on_client_disconnect.label',
+    descriptionKey: 'ui.settings.fields.remote_monitor_disconnect_on_client_disconnect.description',
+    platform: 'windows',
+  }),
+];
+
 const everydayPacingFields = (): SettingsField[] => [
   boolean('frame_limiter_enable', {
     labelKey: 'ui.settings.fields.frame_limiter_enable.label',
@@ -392,6 +410,10 @@ export const settingsCategories: SettingsCategory[] = [
             recommended: true,
           }),
         ],
+      },
+      {
+        id: 'everyday_remote_monitor',
+        fields: remoteMonitorFields(),
       },
       {
         id: 'everyday_resolution',
@@ -478,6 +500,10 @@ export const settingsCategories: SettingsCategory[] = [
       {
         id: 'display_virtual',
         fields: [...everydayDisplayFields(), ...virtualDisplayCustomizationFields()],
+      },
+      {
+        id: 'display_remote_monitor',
+        fields: remoteMonitorFields(),
       },
       {
         id: 'display_target',
@@ -615,6 +641,21 @@ export const settingsCategories: SettingsCategory[] = [
           boolean('keyboard'),
           boolean('mouse'),
           boolean('controller'),
+          select(
+            'gamepad',
+            [
+              option('auto', '_common.auto'),
+              option('x360', 'config.gamepad_x360'),
+              option('ds4', 'config.gamepad_ds4'),
+              option('vhf', 'config.gamepad_vhf'),
+              option('vhf_xbox', 'config.gamepad_vhf_xbox'),
+              option('vhf_xbox_one', 'config.gamepad_vhf_xbox_one'),
+              option('vhf_ds4', 'config.gamepad_vhf_ds4'),
+              option('vhf_ds5', 'config.gamepad_vhf_ds5'),
+              option('vhf_switch', 'config.gamepad_vhf_switch'),
+            ],
+            { platform: 'windows' },
+          ),
           boolean('motion_as_ds4'),
           boolean('touchpad_as_ds4'),
           boolean('ds4_back_as_touchpad_click'),
@@ -806,6 +847,9 @@ export const settingsCategories: SettingsCategory[] = [
 export const settingsDefaults: Record<string, unknown> = {
   virtual_display_mode: 'per_client',
   virtual_display_layout: 'exclusive',
+  remote_monitor_mute_audio: false,
+  remote_monitor_disconnect_on_stream_end: false,
+  remote_monitor_disconnect_on_client_disconnect: false,
   dd_virtual_display_scale: -1,
   frame_limiter_enable: false,
   frame_limiter_provider: 'auto',

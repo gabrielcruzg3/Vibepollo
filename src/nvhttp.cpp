@@ -147,6 +147,10 @@ namespace nvhttp {
     forget_remote_owner(client_uuid, remote_session::role_e::input, generation);
   }
 
+  void notify_remote_monitor_released(const std::string_view client_uuid, const std::uint64_t generation) {
+    forget_remote_owner(client_uuid, remote_session::role_e::monitor, generation);
+  }
+
   namespace fs = std::filesystem;
   namespace pt = boost::property_tree;
 
@@ -3532,13 +3536,18 @@ namespace nvhttp {
           return;
         }
         if (decision.terminate) {
-          if (remote_session::arm_or_confirm_termination(request_client_identity.uuid, game.generation, game.app.id) == remote_session::terminate_confirmation_e::prompt) {
+          const auto confirmation = remote_session::arm_or_confirm_termination(request_client_identity.uuid, game.generation, game.app.id);
+          if (confirmation == remote_session::terminate_confirmation_e::prompt) {
+            BOOST_LOG(info) << "Terminate confirmation armed for client " << request_client_identity.uuid
+                            << " (app=" << game.app.id << ", generation=" << game.generation << ").";
             tree.put("root.resume", 0);
             tree.put("root.gamesession", 0);
             tree.put("root.<xmlattr>.status_code", 410);
             tree.put("root.<xmlattr>.status_message", std::string {remote_session::termination_confirmation_message()});
             return;
           }
+          BOOST_LOG(info) << "Terminate confirmation accepted for client " << request_client_identity.uuid
+                          << " (app=" << game.app.id << ", generation=" << game.generation << ").";
           const bool disconnected = rtsp_stream::disconnect_game_sessions(true);
           // Role-scoped transport teardown deliberately preserves Remote Monitor
           // and Remote Input, but it does not end the configured application.
@@ -5200,9 +5209,12 @@ namespace nvhttp {
   }
 
   bool disconnect_client(const std::string &uuid) {
-    // Administrative disconnect stops transport only. Retained monitor
-    // ownership remains available through Resume until explicit release,
-    // unpair, or shutdown.
+    // Capture the generation before stopping transport. The join path may
+    // retain it for Resume, while a newer launch admitted after this point
+    // must never be released by this disconnect request.
+    const auto monitor_generation = config::video.remote_monitor_disconnect_on_client_disconnect ?
+                                      remote_owner_generation(uuid, remote_session::role_e::monitor) :
+                                      std::nullopt;
     const auto disconnect = rtsp_stream::disconnect_client_sessions_with_result(uuid);
     // The pending-map removal result is the linearization point. A newer
     // generation admitted after it must not be cleared by this disconnect.
@@ -5217,7 +5229,25 @@ namespace nvhttp {
     for (const auto &owner : rtsp_stream::pending_policy::disconnect_input_owners_to_forget(removed)) {
       forget_remote_owner(owner.client_uuid, owner.role, owner.generation);
     }
-    return disconnect.disconnected;
+
+    bool monitor_disconnected = false;
+    if (monitor_generation) {
+      std::unique_lock lifecycle_lock {stream_lifecycle_mutex()};
+      // An active session may already have released this generation while it
+      // joined above. Recheck under the lifecycle gate so this path handles
+      // only retained/pending ownership and never repeats or reaches into a
+      // newer Remote Monitor launch.
+      if (remote_owner_generation(uuid, remote_session::role_e::monitor) != monitor_generation) {
+        return disconnect.disconnected;
+      }
+      remote_session::release_monitor(uuid, *monitor_generation, "Paired client disconnected");
+      forget_remote_owner(uuid, remote_session::role_e::monitor, *monitor_generation);
+#ifdef _WIN32
+      cleanup_virtual_display_if_idle_locked();
+#endif
+      monitor_disconnected = true;
+    }
+    return disconnect.disconnected || monitor_disconnected;
   }
 
   bool has_client_uuid(std::string_view uuid) {

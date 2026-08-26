@@ -33,6 +33,7 @@
 #include <nlohmann/json.hpp>
 
 // local includes
+#include "amf/amf_lifecycle.h"
 #include "config.h"
 #include "config_key.h"
 #include "config_playnite.h"
@@ -917,6 +918,10 @@ namespace config {
     video_t::virtual_display_mode_e::per_client,  // virtual_display_mode
     video_t::virtual_display_layout_e::exclusive,  // virtual_display_layout
 
+    false,  // remote_monitor_mute_audio
+    false,  // remote_monitor_disconnect_on_stream_end
+    false,  // remote_monitor_disconnect_on_client_disconnect
+
     {
       video_t::dd_t::config_option_e::verify_only,  // configuration_option
       video_t::dd_t::resolution_option_e::automatic,  // resolution_option
@@ -1658,14 +1663,19 @@ namespace config {
     return ret;
   }
 
-  std::vector<::std::string_view> get_supported_gamepad_options() {
-    // The platform owns this static list; keep it by reference so the views remain valid.
-    const auto &options = platf::supported_gamepads(nullptr);
-    std::vector<::std::string_view> opts;
-    opts.reserve(options.size());
-    for (const auto &opt : options) {
-      opts.emplace_back(opt.name);
-    }
+  std::vector<std::string_view> &get_supported_gamepad_options() {
+    // The names are owned by a function-local static inside the platform layer, so these views
+    // stay valid. Build the list once: copying the vector per call left every view dangling and
+    // appended another full set of options on each parse.
+    static std::vector<std::string_view> opts = [] {
+      const auto &options = platf::supported_gamepads(nullptr);
+      std::vector<std::string_view> names;
+      names.reserve(options.size());
+      for (const auto &opt : options) {
+        names.emplace_back(opt.name);
+      }
+      return names;
+    }();
     return opts;
   }
 
@@ -1804,7 +1814,7 @@ namespace config {
     int_f(vars, "amd_vbaq", video.amd.amd_vbaq, amd::tristate_from_view);
     bool_f(vars, "amd_enforce_hrd", (bool &) video.amd.amd_enforce_hrd);
 
-    // Native AMF encoder (amdvce) tuning knobs.
+    // Native AMF encoder (amdvce_experimental) tuning knobs.
     int_f(vars, "amd_ltr_frames", video.amd.amd_ltr_frames);
     if (video.amd.amd_ltr_frames < 0 || video.amd.amd_ltr_frames > 2) {
       BOOST_LOG(warning) << "config: amd_ltr_frames must be between 0 and 2, clamping: "sv << video.amd.amd_ltr_frames;
@@ -1845,6 +1855,12 @@ namespace config {
     string_f(vars, "capture", video.capture);
     bool_f(vars, "wgc_pacing_smoothing", video.wgc_pacing_smoothing);
     string_f(vars, "encoder", video.encoder);
+    const auto configured_encoder = video.encoder;
+    video.encoder = std::string(amf::lifecycle::canonical_encoder_name(video.encoder));
+    if (video.encoder != configured_encoder) {
+      BOOST_LOG(info) << "config: encoder = " << configured_encoder
+                      << " is deprecated; using " << video.encoder << '.';
+    }
     string_f(vars, "adapter_name", video.adapter_name);
     string_f(vars, "adapter_pnp_id", video.adapter_pnp_id);
     if (!video.adapter_pnp_id.empty() && video.adapter_name.empty()) {
@@ -1866,6 +1882,9 @@ namespace config {
     }
 #endif
     generic_f(vars, "virtual_display_layout", video.virtual_display_layout, virtual_display_layout_from_view);
+    bool_f(vars, "remote_monitor_mute_audio", video.remote_monitor_mute_audio);
+    bool_f(vars, "remote_monitor_disconnect_on_stream_end", video.remote_monitor_disconnect_on_stream_end);
+    bool_f(vars, "remote_monitor_disconnect_on_client_disconnect", video.remote_monitor_disconnect_on_client_disconnect);
 
     generic_f(vars, "dd_configuration_option", video.dd.configuration_option, dd::config_option_from_view);
     generic_f(vars, "dd_resolution_option", video.dd.resolution_option, dd::resolution_option_from_view);
@@ -2949,7 +2968,10 @@ namespace config {
       if (name == adapter_pnp_id_key) {
         continue;
       }
-      base.insert_or_assign(name, value);
+      base.insert_or_assign(
+        name,
+        name == "encoder" ? std::string(amf::lifecycle::canonical_encoder_name(value)) : value
+      );
     }
 
     const auto adapter_name = overrides.find(std::string(adapter_name_key));
@@ -3193,6 +3215,9 @@ namespace config {
       auto normalized_key = nv::normalize_split_encode_key(std::move(k));
       if (!is_valid_override_key(normalized_key) || !is_allowed_override_key(normalized_key)) {
         continue;
+      }
+      if (normalized_key == "encoder") {
+        v = std::string(amf::lifecycle::canonical_encoder_name(v));
       }
       filtered.emplace(std::move(normalized_key), std::move(v));
     }

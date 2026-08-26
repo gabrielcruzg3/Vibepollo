@@ -155,11 +155,26 @@ export function getConfigSelectOptions(
         switch: 'config.gamepad_switch',
         x360: 'config.gamepad_x360',
         xone: 'config.gamepad_xone',
+        vhf: 'config.gamepad_vhf',
+        vhf_xbox: 'config.gamepad_vhf_xbox',
+        vhf_xbox_one: 'config.gamepad_vhf_xbox_one',
+        vhf_ds4: 'config.gamepad_vhf_ds4',
+        vhf_ds5: 'config.gamepad_vhf_ds5',
+        vhf_switch: 'config.gamepad_vhf_switch',
       };
       const prioritizedByPlatform: Record<string, string[]> = {
         freebsd: ['switch', 'xone'],
         linux: ['ds5', 'xone', 'switch', 'x360'],
-        windows: ['x360', 'ds4'],
+        windows: [
+          'x360',
+          'ds4',
+          'vhf',
+          'vhf_xbox',
+          'vhf_xbox_one',
+          'vhf_ds4',
+          'vhf_ds5',
+          'vhf_switch',
+        ],
       };
       const fallbackOrder = ['x360', 'ds5', 'ds4'];
 
@@ -206,10 +221,10 @@ export function getConfigSelectOptions(
       if (platform === 'windows') {
         if (hasNvidia) options.push({ label: 'NVIDIA NVENC', value: 'nvenc' });
         if (hasIntel) options.push({ label: 'Intel QuickSync', value: 'quicksync' });
-        if (hasAmd) options.push({ label: 'AMD AMF/VCE', value: 'amdvce' });
-        // Explicit rollback to the FFmpeg AMF path — never probed automatically,
-        // so it must stay selectable here.
-        if (hasAmd) options.push({ label: 'AMD AMF/VCE (legacy FFmpeg)', value: 'amdvce_legacy' });
+        if (hasAmd) options.push({ label: 'AMD AMF/VCE (FFmpeg)', value: 'amdvce_ffmpeg' });
+        if (hasAmd) {
+          options.push({ label: 'AMD AMF/VCE (Experimental)', value: 'amdvce_experimental' });
+        }
       } else if (platform === 'linux') {
         options.push(
           { label: 'NVIDIA NVENC', value: 'nvenc' },

@@ -1165,6 +1165,8 @@ namespace confighttp {
       bool installed = platf::is_vigem_installed(&version);
       nlohmann::json out;
       out["installed"] = installed;
+      // ViGEmBus is only a requirement when nothing else can provide a virtual controller.
+      out["required"] = !platf::is_virtual_gamepad_driver_available();
       if (!version.empty()) {
         out["version"] = version;
       }
@@ -4628,6 +4630,34 @@ namespace confighttp {
 
 #ifdef _WIN32
   /**
+   * @brief Execute the same terminal virtual-display cleanup as the restore hotkey.
+   * @api_examples{/api/display/terminate_virtual| POST| {"status":true}}
+   */
+  void postTerminateVirtualDisplay(resp_https_t response, req_https_t request) {
+    if (!check_content_type(response, request, "application/json")) {
+      return;
+    }
+    if (!authenticate(response, request)) {
+      return;
+    }
+    print_req(request);
+
+    nlohmann::json out;
+    const auto result = platf::virtual_display_cleanup::terminate_all("maintenance_api");
+    out["status"] = result.virtual_displays_removed;
+    out["driver_watchdog_stopped"] = true;
+    out["recovery_disengaged"] = true;
+    out["virtual_displays_removed"] = result.virtual_displays_removed;
+    out["restore_dispatched"] = result.helper_revert_dispatched;
+    out["database_restore_applied"] = result.database_restore_applied;
+    out["watchdogs_stopped"] = true;
+    if (!result.virtual_displays_removed) {
+      out["error"] = "One or more managed virtual displays could not be removed.";
+    }
+    send_response(response, out, "no-store");
+  }
+
+  /**
    * @brief Export the current Windows display settings as a golden restore snapshot.
    * @api_examples{/api/display/export_golden| POST| {"status":true}}
    */
@@ -5562,12 +5592,16 @@ namespace confighttp {
     output_tree["version"] = version_str;
     output_tree["version_compatible"] = version_compatible;
     output_tree["packaged_version"] = VIGEMBUS_PACKAGED_VERSION;
+    // Drives whether the UI presents a missing ViGEmBus as a problem or as an
+    // unused option: Vibeshine's own driver provides controllers without it.
+    output_tree["required"] = !platf::is_virtual_gamepad_driver_available();
 #else
     output_tree["error"] = "ViGEmBus is only available on Windows";
     output_tree["installed"] = false;
     output_tree["version"] = "";
     output_tree["version_compatible"] = false;
     output_tree["packaged_version"] = "";
+    output_tree["required"] = false;
 #endif
 
     send_response(response, output_tree);
@@ -5841,6 +5875,7 @@ namespace confighttp {
     register_api_route("^/api/quit$", "POST", quit);
     register_blocking_api_route("^/api/reset-display-device-persistence$", "POST", resetDisplayDevicePersistence);
 #if defined(_WIN32)
+    register_blocking_api_route("^/api/display/terminate_virtual$", "POST", postTerminateVirtualDisplay);
     register_blocking_api_route("^/api/display/export_golden$", "POST", postExportGoldenDisplay);
     register_blocking_api_route("^/api/display/golden_status$", "GET", getGoldenStatus);
     register_api_route("^/api/display/golden$", "DELETE", deleteGolden);
