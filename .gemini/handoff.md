@@ -4,9 +4,11 @@
 
 - **Repository**: [gabrielcruzg3/Vibepollo](https://github.com/gabrielcruzg3/Vibepollo) (Fork of [Nonary/Vibepollo](https://github.com/Nonary/Vibepollo))
 - **Active Branch**: `dev/agy` (tracks `origin/dev/agy`)
-- **Current Version**: `1.19.0-alpha.1-agy` (Upstream baseline: `1.19.0-alpha.1`)
-- **Draft Release on GitHub**: [`1.19.0-alpha.1-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases)
-- **Previous Release**: [`v1.18.4-agy.1`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/v1.18.4-agy.1)
+- **Current Version**: `1.19.0-alpha.2-agy` (Upstream baseline: `1.19.0-alpha.2`)
+- **Draft Release on GitHub**: [`1.19.0-alpha.2-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases)
+- **Published Releases**:
+  - [`1.19.0-alpha.1-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-alpha.1-agy) (Upstream `1.19.0-alpha.1`)
+  - [`v1.18.4-agy.1`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/v1.18.4-agy.1) (Upstream `1.18.4-stable.2`)
 - **Local Directory**: `/home/g3/Vibepollo`
 
 ---
@@ -18,9 +20,9 @@ Our fork follows upstream release tags step-by-step using the naming convention 
 
 | Version / Tag | Base Upstream Tag | Merge Status | Test Suite | Release Status |
 |---|---|---|---|---|
-| `v1.18.4-agy.1` | `1.18.4-stable.2` | Initial fork base | 33/33 Passed | Published |
-| **`1.19.0-alpha.1-agy`** | **`1.19.0-alpha.1`** | **Clean Merge + Locale Contract Fix** | **36/36 Passed (100%)** | **Draft / Ready for Testing** |
-| *Next*: `1.19.0-alpha.2-agy` | `1.19.0-alpha.2` | *Pending* | - | - |
+| `v1.18.4-agy.1` | `1.18.4-stable.2` | Initial fork base | 33/33 Passed | **Published** |
+| `1.19.0-alpha.1-agy` | `1.19.0-alpha.1` | Clean Merge + Locale Contract Fix | 36/36 Passed (100%) | **Published** |
+| **`1.19.0-alpha.2-agy`** | **`1.19.0-alpha.2`** | **Clean Merge** | **36/36 Passed (100%)** | **Draft / Ready for Testing** |
 | *Next*: `1.19.0-beta.1-agy` | `1.19.0-beta.1` | *Pending* | - | - |
 | *Next*: `1.19.0-beta.2-agy` | `1.19.0-beta.2` | *Pending* | - | - |
 | *Next*: `1.19.0-beta.3-agy` | `1.19.0-beta.3` | *Pending* | - | - |
@@ -55,7 +57,7 @@ From `/home/g3/Vibepollo`:
 export PATH="/usr/local/cuda-13.1/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 export CC=gcc-14
 export CXX=g++-14
-export BUILD_VERSION=1.19.0-alpha.1-agy
+export BUILD_VERSION=1.19.0-alpha.2-agy
 
 cmake -B build -G Ninja -S . \
   -DBUILD_TESTS=ON \
@@ -95,32 +97,32 @@ mkdir -p build/cpack_artifacts
 # Generate standalone (all-in-one) package
 cmake -B build -DCPACK_DEB_COMPONENT_INSTALL=OFF
 cpack -G DEB --config build/CPackConfig.cmake
-mv build/cpack_artifacts/Vibepollo.deb build/cpack_artifacts/Vibepollo-standalone-1.19.0-alpha.1-agy.deb
+mv build/cpack_artifacts/Vibepollo.deb build/cpack_artifacts/Vibepollo-standalone-1.19.0-alpha.2-agy.deb
 
 # Generate split packages (core & web assets separately)
 cmake -B build -DCPACK_DEB_COMPONENT_INSTALL=ON
 cpack -G DEB --config build/CPackConfig.cmake
-mv build/cpack_artifacts/Vibepollo-Unspecified.deb build/cpack_artifacts/Vibepollo-core-1.19.0-alpha.1-agy.deb
-mv build/cpack_artifacts/Vibepollo-assets.deb build/cpack_artifacts/Vibepollo-web-1.19.0-alpha.1-agy.deb
+mv build/cpack_artifacts/Vibepollo-Unspecified.deb build/cpack_artifacts/Vibepollo-core-1.19.0-alpha.2-agy.deb
+mv build/cpack_artifacts/Vibepollo-assets.deb build/cpack_artifacts/Vibepollo-web-1.19.0-alpha.2-agy.deb
 ```
 
 ---
 
-## 5. Generated Release Packages (`1.19.0-alpha.1-agy`)
+## 5. Generated Release Packages (`1.19.0-alpha.2-agy`)
 
 Located in `build/cpack_artifacts/`:
 
 | Artifact Name | Size | Contents |
 |---|---|---|
-| **`Vibepollo-standalone-1.19.0-alpha.1-agy.deb`** | `19.8 MB` | Complete standalone installer containing core binary (`sunshine-1.19.0-alpha.1-agy`), Web UI assets, systemd units, icons, and shaders. |
-| **`Vibepollo-core-1.19.0-alpha.1-agy.deb`** | `14.8 MB` | Backend executable and system integration only (no Web UI assets). |
-| **`Vibepollo-web-1.19.0-alpha.1-agy.deb`** | `5.0 MB` | Frontend Web UI assets only (`/usr/share/sunshine/web/`). |
+| **`Vibepollo-standalone-1.19.0-alpha.2-agy.deb`** | `19.8 MB` | Complete standalone installer containing core binary (`sunshine-1.19.0-alpha.2-agy`), Web UI assets, systemd units, icons, and shaders. |
+| **`Vibepollo-core-1.19.0-alpha.2-agy.deb`** | `14.8 MB` | Backend executable and system integration only (no Web UI assets). |
+| **`Vibepollo-web-1.19.0-alpha.2-agy.deb`** | `5.0 MB` | Frontend Web UI assets only (`/usr/share/sunshine/web/`). |
 
 ### Publishing Draft Release (When Ready)
 A draft release is staged on GitHub:
 ```bash
 # To publish the draft release after testing:
-gh release edit 1.19.0-alpha.1-agy --draft=false --repo gabrielcruzg3/Vibepollo
+gh release edit 1.19.0-alpha.2-agy --draft=false --repo gabrielcruzg3/Vibepollo
 ```
 
 ---
