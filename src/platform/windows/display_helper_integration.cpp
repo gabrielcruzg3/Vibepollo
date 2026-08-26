@@ -46,6 +46,7 @@
   #include "src/platform/windows/misc.h"
   #include "src/platform/windows/virtual_display.h"
   #include "src/process.h"
+  #include "src/remote_display_topology.h"
   #include "src/state_storage.h"
   #include "src/stream.h"
   #include "src/webrtc_stream.h"
@@ -69,6 +70,12 @@ namespace {
     static ProcessHandler h(/*use_job=*/false);
     return h;
   }
+
+  // The legacy and v2 engines intentionally share one executable and one IPC
+  // pipe. Keep the engine selected for the process owned by this Sunshine
+  // instance so a configuration change cannot reuse the other engine merely
+  // because it answers the common ping frame.
+  static std::optional<bool> g_running_helper_legacy;
 
   struct PendingSessionSnapshot {
     std::uint32_t id = 0;
@@ -546,7 +553,20 @@ namespace {
     for (const auto &[device_id, point] : topology.monitor_positions) {
       BOOST_LOG(debug) << "Display helper: setting origin for " << device_id
                        << " to (" << point.m_x << "," << point.m_y << ") after " << label << ".";
-      (void) ctx->display->setDisplayOrigin(device_id, point);
+      if (!ctx->display->setDisplayOrigin(device_id, point)) {
+        BOOST_LOG(warning) << "Display helper: failed to set origin for " << device_id << " (" << label << ").";
+        // Do not continue applying later origins after one move fails. A
+        // second move can occupy the failed device's still-current origin and
+        // turn an otherwise extended topology into an unintended clone.
+        return false;
+      }
+    }
+
+    if (topology.primary_device && !topology.primary_device->empty() &&
+        !ctx->display->setAsPrimary(*topology.primary_device)) {
+      BOOST_LOG(warning) << "Display helper: failed to set remote composed primary "
+                         << *topology.primary_device << " (" << label << ").";
+      topology_ok = false;
     }
 
     return topology_ok;
@@ -1118,6 +1138,7 @@ namespace {
         operation_deadline_expired(operation_deadline)) {
       return false;
     }
+    const bool legacy_engine = use_legacy_helper_engine();
     // Already started? Verify liveness to avoid stale or wedged state
     if (HANDLE h = helper_proc().get_process_handle(); h != nullptr) {
       BOOST_LOG(debug) << "Display helper: checking existing process handle...";
@@ -1125,7 +1146,52 @@ namespace {
       if (wait == WAIT_TIMEOUT) {
         DWORD pid = GetProcessId(h);
         BOOST_LOG(debug) << "Display helper already running (pid=" << pid << ")";
-        if (!force_restart) {
+        const bool engine_matches = g_running_helper_legacy.has_value() &&
+                                     *g_running_helper_legacy == legacy_engine;
+        if (!engine_matches) {
+          BOOST_LOG(info) << "Display helper engine mismatch: running="
+                          << (g_running_helper_legacy.has_value() ?
+                                (*g_running_helper_legacy ? "legacy" : "v2") : "unknown")
+                          << ", selected=" << (legacy_engine ? "legacy" : "v2")
+                          << "; terminating and relaunching.";
+          if (!platf::display_helper_client::reset_connection_cancellable(
+                cancellation_predicate,
+                operation_deadline)) {
+            return false;
+          }
+          helper_proc().terminate();
+
+          DWORD wait_result = WAIT_TIMEOUT;
+          if (!wait_for_process_with_cancellation(
+                h,
+                kHelperForceKillWaitMs,
+                cancellation_predicate,
+                wait_result,
+                operation_deadline)) {
+            return false;
+          }
+          if (wait_result == WAIT_OBJECT_0) {
+            DWORD exit_code = 0;
+            GetExitCodeProcess(h, &exit_code);
+            BOOST_LOG(info) << "Display helper exited after engine-switch termination (code="
+                            << exit_code << ").";
+          } else if (wait_result == WAIT_TIMEOUT) {
+            BOOST_LOG(warning) << "Display helper: process did not exit within "
+                               << kHelperForceKillWaitMs
+                               << " ms after engine-switch termination; continuing with cleanup.";
+          } else {
+            DWORD wait_err = GetLastError();
+            BOOST_LOG(warning) << "Display helper: wait after engine-switch termination failed (winerr="
+                               << wait_err << "); continuing with cleanup.";
+          }
+          g_running_helper_legacy.reset();
+          if (!sleep_with_cancellation(
+                std::chrono::milliseconds(100),
+                cancellation_predicate,
+                operation_deadline)) {
+            return false;
+          }
+        } else if (!force_restart) {
           // Check IPC liveness with a lightweight ping; if responsive, reuse existing helper
           bool ping_ok = false;
           for (int i = 0; i < 2 && !ping_ok; ++i) {
@@ -1216,6 +1282,7 @@ namespace {
         DWORD exit_code = 0;
         GetExitCodeProcess(h, &exit_code);
         BOOST_LOG(debug) << "Display helper process detected as exited (code=" << exit_code << "); preparing restart.";
+        g_running_helper_legacy.reset();
       }
     }
     if (shutting_down ||
@@ -1252,7 +1319,6 @@ namespace {
 
     const bool allow_system_fallback = platf::is_running_as_system() && !user_session_ready();
     // Select the helper engine (legacy fallback vs v2) and propagate the log level.
-    const bool legacy_engine = use_legacy_helper_engine();
     std::wstring helper_args = legacy_engine ? L"--engine=legacy" : L"--engine=v2";
     helper_args += L" --log-level=";
     helper_args += std::to_wstring(std::clamp(config::sunshine.min_log_level, 0, 6));
@@ -1282,13 +1348,13 @@ namespace {
       note_helper_start_failure("process launch failure");
       return false;
     }
-
     HANDLE h = helper_proc().get_process_handle();
     if (!h) {
       BOOST_LOG(error) << "Display helper started but no process handle available";
       note_helper_start_failure("missing process handle");
       return false;
     }
+    g_running_helper_legacy = legacy_engine;
 
     DWORD pid = GetProcessId(h);
     BOOST_LOG(info) << "Display helper successfully started (pid=" << pid << ")";
@@ -2141,6 +2207,12 @@ namespace display_helper_integration {
   }
 
   bool revert(bool prefer_golden_if_current_missing) {
+    if (!remote_display_topology::instance().generic_virtual_display_cleanup_allowed()) {
+      proc::defer_display_revert();
+      BOOST_LOG(info) << "Display helper: deferring REVERT until all managed client display sessions release ownership.";
+      return false;
+    }
+
     std::unique_lock<std::mutex> execution_lock(pending_apply_execution_mutex());
     invalidate_apply_verification();
     clear_pending_apply_queue_locked();
@@ -2727,6 +2799,10 @@ namespace display_helper_integration {
                       << " existing virtual display identity from the stream topology baseline.";
     }
     return topology;
+  }
+
+  bool apply_remote_composed_topology(const DisplayTopologyDefinition &topology) {
+    return apply_topology_definition(topology, "remote-monitor coordinator");
   }
 
   std::string enumerate_devices_json(display_device::DeviceEnumerationDetail detail) {

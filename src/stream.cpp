@@ -18,6 +18,7 @@
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <stdexcept>
 #include <system_error>
 #include <thread>
 #include <type_traits>
@@ -46,7 +47,9 @@ extern "C" {
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "process.h"
+#include "remote_display_topology.h"
 #include "rtsp.h"
+#include "rtsp_pending_policy.h"
 #include "session_history.h"
 #include "stream.h"
 #include "sync.h"
@@ -550,6 +553,9 @@ namespace stream {
     int stream_fps = 0;
     int stream_fps_scaled = 0;
     std::uint32_t client_display_refresh_millihz = 0;
+    remote_session::role_e remote_role {remote_session::role_e::game};
+    std::uint64_t remote_role_generation {};
+    bool input_only {};
 
     safe::mail_t mail;
 
@@ -1636,7 +1642,7 @@ namespace stream {
     std::optional<std::chrono::steady_clock::time_point> process_terminated_since;
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
       const bool process_running = proc::proc.running() != 0;
-      bool has_session_awaiting_peer = false;
+      bool has_live_session = false;
 
       {
         auto lg = server->_sessions.lock();
@@ -1693,6 +1699,8 @@ namespace stream {
             continue;
           }
 
+          has_live_session = true;
+
           // Remember if we have a session that's waiting for a peer to connect to the
           // control stream. This ensures the clients are properly notified even when
           // the app terminates before they finish connecting.
@@ -1705,7 +1713,6 @@ namespace stream {
               ++pos;
               continue;
             }
-            has_session_awaiting_peer = true;
           } else {
             auto &feedback_queue = session->control.feedback_queue;
             while (feedback_queue->peek()) {
@@ -1733,8 +1740,15 @@ namespace stream {
       }
 #endif
 
-      // Don't break until any pending sessions either expire or connect
-      if (!process_running && !has_session_awaiting_peer) {
+      // Remote Input and Remote Monitor deliberately have no configured app
+      // process. Keep the shared control server alive across both the gap
+      // before RTSP publishes the session and the complete live transport.
+      const bool launch_or_startup_pending = rtsp_stream::has_pending_launch_or_startup();
+      if (!rtsp_stream::pending_policy::control_server_should_remain_alive(
+            process_running,
+            has_live_session,
+            launch_or_startup_pending
+          )) {
         BOOST_LOG(info) << "Process terminated"sv;
         break;
       }
@@ -2672,7 +2686,8 @@ namespace stream {
              other_rtsp_teardown ||
              webrtc_stream::has_active_or_pending_sessions() ||
              webrtc_stream::has_capture_active() ||
-             other_webrtc_teardown;
+             other_webrtc_teardown ||
+             remote_display_topology::instance().managed_client_identity_count() != 0;
     }
 
     void arm_shared_runtime_cleanup(
@@ -2848,6 +2863,10 @@ namespace stream {
       return false;
     }
 
+    bool remote_role_match(const session_t &session, const remote_session::role_e role, const std::optional<std::uint64_t> generation) {
+      return session.remote_role == role && (!generation || session.remote_role_generation == *generation);
+    }
+
     void stop(session_t &session) {
       while_starting_do_nothing(session.state);
       auto expected = state_e::RUNNING;
@@ -2891,7 +2910,7 @@ namespace stream {
       session.controlEnd.raise(true);
     }
 
-    void join(session_t &session) {
+    void join(session_t &session, const bool lifecycle_lock_held) {
       bool teardown_reserved = true;
       teardown_sessions.fetch_add(1, std::memory_order_acq_rel);
       auto teardown_reservation = util::fail_guard([&]() {
@@ -2914,7 +2933,9 @@ namespace stream {
         session.videoThread.join();
         hung_stage->store("audio thread");
         BOOST_LOG(debug) << "Waiting for audio to end..."sv;
-        session.audioThread.join();
+        if (session.audioThread.joinable()) {
+          session.audioThread.join();
+        }
         hung_stage->store("control end");
         BOOST_LOG(debug) << "Waiting for control to end..."sv;
         session.controlEnd.view();
@@ -2953,9 +2974,21 @@ namespace stream {
         exec_thread.detach();
       }
 
+      if (session.remote_role == remote_session::role_e::monitor && !session.device_uuid.empty()) {
+        // A monitor transport disappearing is not a release. The topology
+        // owner keeps its logical lease until an explicit, generation-matched
+        // disconnect, unpair, or shutdown request arrives.
+        remote_session::notify_monitor_transport_lost(session.device_uuid, session.remote_role_generation);
+      } else if (session.remote_role == remote_session::role_e::input && !session.device_uuid.empty()) {
+        nvhttp::notify_remote_input_transport_lost(session.device_uuid, session.remote_role_generation);
+      }
+
       // Serialize only the ownership transition and shared cleanup. Blocking
       // thread joins above must remain outside the lifecycle gate.
-      std::unique_lock<std::mutex> lifecycle_lock(nvhttp::stream_lifecycle_mutex());
+      std::unique_lock<std::mutex> lifecycle_lock(nvhttp::stream_lifecycle_mutex(), std::defer_lock);
+      if (!lifecycle_lock_held) {
+        lifecycle_lock.lock();
+      }
       auto lifecycle_teardown_reservation = util::fail_guard([&]() {
         if (teardown_reserved) {
           teardown_sessions.fetch_sub(1, std::memory_order_acq_rel);
@@ -3059,12 +3092,16 @@ namespace stream {
       session.video.peer.address(addr);
       session.video.peer.port(0);
 
-      session.audio.peer.address(addr);
-      session.audio.peer.port(0);
+      if (!session.input_only) {
+        session.audio.peer.address(addr);
+        session.audio.peer.port(0);
+      }
 
       session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
 
-      session.audioThread = std::thread {audioThread, &session};
+      if (!session.input_only) {
+        session.audioThread = std::thread {audioThread, &session};
+      }
       session.videoThread = std::thread {videoThread, &session};
 
       session.state.store(state_e::RUNNING, std::memory_order_relaxed);
@@ -3226,6 +3263,30 @@ namespace stream {
         session->stream_fps_scaled = fps_millihz;
       }
       session->client_display_refresh_millihz = launch_session.client_display_refresh_millihz;
+      session->remote_role = launch_session.role;
+      session->remote_role_generation = launch_session.role_generation;
+      session->input_only = launch_session.role == remote_session::role_e::input;
+      session->config.monitor.input_only = session->input_only;
+      const auto capture_plan = remote_session::capture_plan(launch_session.role, launch_session.remote_capture_output);
+      switch (capture_plan.source) {
+        case remote_session::capture_source_e::synthetic_black:
+          session->config.monitor.capture_source = video::capture_source_e::synthetic_black;
+          session->config.monitor.capture_output.reset();
+          break;
+        case remote_session::capture_source_e::exact_output:
+          session->config.monitor.capture_source = video::capture_source_e::exact_output;
+          session->config.monitor.capture_output = capture_plan.output;
+          break;
+        case remote_session::capture_source_e::invalid:
+          throw std::runtime_error("Remote Monitor launch is missing its exact capture output");
+        case remote_session::capture_source_e::active_output:
+          session->config.monitor.capture_source = video::capture_source_e::active_output;
+          session->config.monitor.capture_output.reset();
+          break;
+      }
+      BOOST_LOG(info) << "Session capture source: role=" << static_cast<int>(launch_session.role)
+                      << " source=" << static_cast<int>(session->config.monitor.capture_source)
+                      << " output='" << session->config.monitor.capture_output.value_or(std::string {}) << "'.";
 
 #ifdef _WIN32
       session->virtual_display.active = launch_session.virtual_display;
@@ -3259,37 +3320,25 @@ namespace stream {
         session->video.gcm_iv_counter = 0;
       }
 
-      constexpr auto max_block_size = crypto::cipher::round_to_pkcs7_padded(2048);
-
-      util::buffer_t<char> shards {RTPA_TOTAL_SHARDS * max_block_size};
-      util::buffer_t<uint8_t *> shards_p {RTPA_TOTAL_SHARDS};
-
-      for (auto x = 0; x < RTPA_TOTAL_SHARDS; ++x) {
-        shards_p[x] = (uint8_t *) &shards[x * max_block_size];
+      if (!session->input_only) {
+        constexpr auto max_block_size = crypto::cipher::round_to_pkcs7_padded(2048);
+        util::buffer_t<char> shards {RTPA_TOTAL_SHARDS * max_block_size};
+        util::buffer_t<uint8_t *> shards_p {RTPA_TOTAL_SHARDS};
+        for (auto x = 0; x < RTPA_TOTAL_SHARDS; ++x) shards_p[x] = (uint8_t *) &shards[x * max_block_size];
+        session->audio.shards = std::move(shards);
+        session->audio.shards_p = std::move(shards_p);
+        session->audio.fec_packet.rtp.header = 0x80;
+        session->audio.fec_packet.rtp.packetType = 127;
+        session->audio.fec_packet.rtp.timestamp = 0;
+        session->audio.fec_packet.rtp.ssrc = 0;
+        session->audio.fec_packet.fecHeader.payloadType = 97;
+        session->audio.fec_packet.fecHeader.ssrc = 0;
+        session->audio.cipher = crypto::cipher::cbc_t {launch_session.gcm_key, true};
+        session->audio.ping_payload = launch_session.av_ping_payload;
+        session->audio.avRiKeyId = util::endian::big(*(std::uint32_t *) launch_session.iv.data());
+        session->audio.sequenceNumber = 0;
+        session->audio.timestamp = 0;
       }
-
-      // Audio FEC spans multiple audio packets,
-      // therefore its session specific
-      session->audio.shards = std::move(shards);
-      session->audio.shards_p = std::move(shards_p);
-
-      session->audio.fec_packet.rtp.header = 0x80;
-      session->audio.fec_packet.rtp.packetType = 127;
-      session->audio.fec_packet.rtp.timestamp = 0;
-      session->audio.fec_packet.rtp.ssrc = 0;
-
-      session->audio.fec_packet.fecHeader.payloadType = 97;
-      session->audio.fec_packet.fecHeader.ssrc = 0;
-
-      session->audio.cipher = crypto::cipher::cbc_t {
-        launch_session.gcm_key,
-        true
-      };
-
-      session->audio.ping_payload = launch_session.av_ping_payload;
-      session->audio.avRiKeyId = util::endian::big(*(std::uint32_t *) launch_session.iv.data());
-      session->audio.sequenceNumber = 0;
-      session->audio.timestamp = 0;
 
       session->control.peer = nullptr;
       session->state.store(state_e::STOPPED, std::memory_order_relaxed);

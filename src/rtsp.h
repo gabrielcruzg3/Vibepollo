@@ -7,6 +7,7 @@
 // standard includes
 #include "config.h"
 #include "framegen_policy.h"
+#include "remote_session.h"
 
 #include <array>
 #include <atomic>
@@ -45,6 +46,12 @@ namespace rtsp_stream {
     };
 
     uint32_t id;
+    remote_session::role_e role {remote_session::role_e::game};
+    std::uint64_t role_generation {};
+    // The exact topology-owned capture target for Remote Monitor. Empty means
+    // no target was verified and must never fall back to a physical display.
+    std::optional<std::string> remote_capture_output;
+    std::string rtsp_source_address;
 
     crypto::aes_t gcm_key;
     crypto::aes_t iv;
@@ -102,6 +109,9 @@ namespace rtsp_stream {
     // Present only when the client explicitly selected a virtual or physical display.
     std::optional<bool> client_virtual_display_override;
     bool virtual_display;
+    bool normal_vdd_capacity_rejected = false;
+    bool normal_vdd_identity_newly_reserved = false;
+    std::uint64_t normal_vdd_identity_token = 0;
     uint32_t scale_factor = 100;
     // Host/display resolution derived from a launch-time client override. The RTSP
     // negotiated viewport remains in width/height.
@@ -174,6 +184,12 @@ namespace rtsp_stream {
      * where streaming sessions ran at PERM::_no and silently discarded all input).
      */
     [[nodiscard]] std::shared_ptr<launch_session_t> clone_for_startup() const;
+  };
+
+  struct client_disconnect_result_t {
+    bool disconnected {};
+    std::vector<remote_session::role_e> pending_roles;
+    std::vector<std::uint64_t> pending_generations;
   };
 
   /**
@@ -289,7 +305,16 @@ namespace rtsp_stream {
     });
   }
 
-  void launch_session_raise(std::shared_ptr<launch_session_t> launch_session);
+  // Returns false when the per-launch admission registry rejects the request.
+  // Encrypted launches are independent; plaintext remains one pending launch
+  // per source address because it has no cryptographic routing identity.
+  bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session);
+
+  // Surface the actual plaintext admission warning in the topology UI without
+  // giving that UI a second, divergent notion of RTSP routing state.
+  std::string plaintext_route_warning();
+  bool disconnect_game_sessions(bool lifecycle_lock_held = false);
+  bool disconnect_remote_role_session(std::string_view client_uuid, remote_session::role_e role, std::uint64_t generation, bool lifecycle_lock_held = false);
 
   /**
    * @brief Clear state for the specified launch session.
@@ -349,6 +374,7 @@ namespace rtsp_stream {
    * @return True if one or more sessions were stopped.
    */
   bool disconnect_client_sessions(const std::string &client_uuid);
+  client_disconnect_result_t disconnect_client_sessions_with_result(const std::string &client_uuid);
 
   /**
    * @brief Runs the RTSP server loop.

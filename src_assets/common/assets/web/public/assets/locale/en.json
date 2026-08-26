@@ -944,6 +944,7 @@
     "lossless_scaling_legacy_auto_detect_label": "Use legacy Lossless auto-detection",
     "lossless_scaling_legacy_auto_detect_desc": "Uses a timer-based auto-apply flow instead of the Lossless Scaling hotkey. Not recommended unless the hotkey method fails, because detection can be less reliable.",
     "rtss_frame_limit_type": "RTSS frame limit type",
+    "rtss_allow_virtual_display_override": "Allow non-Reflex RTSS modes on virtual displays",
     "rtss_install_path": "RTSS install path",
     "vibepollo_file_state": "Vibepollo state file",
     "virtual_display_layout": "Virtual display layout",
@@ -2021,7 +2022,7 @@
     },
     "noticeTitle": "Smooth frame pacing",
     "noticeCopy": "Vibepollo applies your selected limiter at stream start and restores your driver settings when the stream ends. RTSS gives the most consistent pacing on physical screens; the NVIDIA driver limiter is the fallback.",
-    "syncLimiterHintVirtual": "On virtual screens Vibepollo selects NVIDIA Reflex automatically (applied through RTSS), so this choice only affects physical-screen streams.",
+    "syncLimiterHintVirtual": "On virtual screens Vibepollo selects NVIDIA Reflex automatically because DLSS Frame Generation can otherwise add significant latency. Enable the virtual-display override in Settings to use another mode; mark a game as Frame generation -> Game provided to force Reflex for that app.",
     "rtssMissingNvFallback": "RTSS isn't installed, so Vibepollo will apply the frame cap through the NVIDIA driver instead. Streaming keeps working, but RTSS's Reflex limiter paces frames more consistently — install it or set the path below for the smoothest stream.",
     "rtssMissingNoFallback": "RTSS isn't installed and no fallback limiter is available on this system, so games can't be frame-capped while streaming. Install RTSS or set the path below.",
     "virtual": {

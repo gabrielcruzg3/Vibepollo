@@ -166,7 +166,8 @@ namespace VDISPLAY {
     int framegen_refresh_multiplier = 1,
     bool hdr_requested = false,
     bool allow_pending_enumeration = false,
-    bool replace_existing = true
+    bool replace_existing = true,
+    bool preserve_peer_displays = false
   );
 
   // Apply an HDR color profile to a physical output (best-effort).
@@ -267,7 +268,9 @@ namespace VDISPLAY {
 
   /**
    * @brief Ensures a display is available for capture/encoding.
-   * If no active physical displays exist, automatically creates a temporary virtual display.
+   * Uses an active physical display when available. Otherwise it defers until
+   * a requesting client creates its own display; encoder probing does not own
+   * a host-side virtual monitor.
    * @return Ownership, exact target identity, and readiness for encoder probing.
    */
   ensure_display_result ensure_display(const std::optional<LUID> &required_adapter_luid = std::nullopt);

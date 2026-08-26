@@ -112,7 +112,8 @@ namespace VDISPLAY_SUDOVDA {
     bool framegen_refresh_active = false,
     int framegen_refresh_multiplier = 1,
     bool hdr_requested = false,
-    bool replace_existing = true
+    bool replace_existing = true,
+    bool preserve_peer_displays = false
   );
   bool removeVirtualDisplay(const GUID &guid);
   static bool remove_virtual_display_impl(
@@ -173,6 +174,7 @@ namespace VDISPLAY_SUDOVDA {
     int framegen_refresh_multiplier,
     bool hdr_requested,
     bool replace_existing,
+    bool preserve_peer_displays,
     bool allow_reinstall,
     std::stop_token stop_token
   );
@@ -2831,6 +2833,7 @@ namespace VDISPLAY_SUDOVDA {
         state.params.hdr_requested,
         true,
         false,
+        false,
         stop_token
       );
       if (!recreation) {
@@ -4084,6 +4087,7 @@ namespace VDISPLAY_SUDOVDA {
       bool framegen_refresh_active,
       int framegen_refresh_multiplier,
       bool replace_existing,
+      bool preserve_peer_displays,
       std::stop_token stop_token
     ) {
       if (stop_token.stop_requested() || SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
@@ -4102,10 +4106,15 @@ namespace VDISPLAY_SUDOVDA {
                        << "' width=" << width << " height=" << height << " fps=" << fps
                        << " guid=" << requested_uuid.string();
 
-      if (!teardown_conflicting_virtual_displays(requested_uuid, stop_token)) {
+      if (VDISPLAY::policy::should_teardown_conflicting_virtual_displays(preserve_peer_displays) &&
+          !teardown_conflicting_virtual_displays(requested_uuid, stop_token)) {
         return std::nullopt;
       }
-      BOOST_LOG(debug) << "teardown_conflicting_virtual_displays completed for guid=" << requested_uuid.string();
+      if (preserve_peer_displays) {
+        BOOST_LOG(debug) << "Preserving peer virtual displays while creating guid=" << requested_uuid.string();
+      } else {
+        BOOST_LOG(debug) << "teardown_conflicting_virtual_displays completed for guid=" << requested_uuid.string();
+      }
       if (!enforce_teardown_cooldown_if_needed(stop_token)) {
         return std::nullopt;
       }
@@ -4366,6 +4375,7 @@ namespace VDISPLAY_SUDOVDA {
     int framegen_refresh_multiplier,
     bool hdr_requested,
     bool replace_existing,
+    bool preserve_peer_displays,
     bool allow_reinstall,
     std::stop_token stop_token
   ) {
@@ -4400,6 +4410,7 @@ namespace VDISPLAY_SUDOVDA {
         framegen_refresh_active,
         framegen_refresh_multiplier,
         replace_existing,
+        preserve_peer_displays,
         stop_token
       );
       if (!result) {
@@ -4408,6 +4419,11 @@ namespace VDISPLAY_SUDOVDA {
         }
         BOOST_LOG(warning) << "Virtual display creation attempt " << attempt << '/' << kMaxInitializationAttempts
                            << " failed.";
+
+        if (!VDISPLAY::policy::may_restart_adapter_after_create_failure(preserve_peer_displays)) {
+          BOOST_LOG(warning) << "Peer-preserving virtual display creation failed closed without restarting the adapter.";
+          return std::nullopt;
+        }
 
         if (attempt == kMaxInitializationAttempts) {
           BOOST_LOG(error) << "Virtual display could not be created after " << kMaxInitializationAttempts << " attempts.";
@@ -4547,7 +4563,8 @@ namespace VDISPLAY_SUDOVDA {
     bool framegen_refresh_active,
     int framegen_refresh_multiplier,
     bool hdr_requested,
-    bool replace_existing
+    bool replace_existing,
+    bool preserve_peer_displays
   ) {
     if (!release_retained_ensure_display_for_stream(s_client_uid)) {
       return std::nullopt;
@@ -4565,6 +4582,7 @@ namespace VDISPLAY_SUDOVDA {
       framegen_refresh_multiplier,
       hdr_requested,
       replace_existing,
+      preserve_peer_displays,
       true,
       {}
     );
@@ -5119,32 +5137,48 @@ namespace VDISPLAY_SUDOVDA {
   // END ISOLATED DISPLAY METHODS
 }  // namespace VDISPLAY_SUDOVDA
 
-bool VDISPLAY_SUDOVDA::has_active_physical_display() {
-  auto devices = platf::display_helper::Coordinator::instance().enumerate_devices(display_device::DeviceEnumerationDetail::Minimal);
-  BOOST_LOG(debug) << "Enumerated devices count: " << (devices ? devices->size() : 0);
-  if (!devices) {
-    BOOST_LOG(warning) << "Physical display enumeration is unavailable; preserving fail-open physical-display detection.";
-    return true;
-  }
+namespace VDISPLAY_SUDOVDA {
+  namespace {
+    struct active_physical_snapshot_t {
+      bool enumeration_available {};
+      std::vector<std::string> display_names;
+    };
 
-  std::vector<std::string> active_physical_displays;
-  for (const auto &device : *devices) {
-    bool is_virtual = is_virtual_display_device(device);
-    if (!is_virtual) {
-      bool is_active = !device.m_display_name.empty();
-      BOOST_LOG(debug) << "Physical device: " << device.m_display_name << ", is_active: " << is_active;
-      if (is_active) {
-        active_physical_displays.push_back(device.m_display_name);
+    active_physical_snapshot_t active_physical_displays() {
+      auto devices = platf::display_helper::Coordinator::instance().enumerate_devices(display_device::DeviceEnumerationDetail::Minimal);
+      BOOST_LOG(debug) << "Enumerated devices count: " << (devices ? devices->size() : 0);
+      if (!devices) {
+        BOOST_LOG(warning) << "Physical display enumeration is unavailable; preserving fail-open physical-display detection.";
+        return {};
       }
+
+      active_physical_snapshot_t snapshot {.enumeration_available = true};
+      for (const auto &device : *devices) {
+        bool is_virtual = is_virtual_display_device(device);
+        if (!is_virtual) {
+          bool is_active = !device.m_display_name.empty();
+          BOOST_LOG(debug) << "Physical device: " << device.m_display_name << ", is_active: " << is_active;
+          if (is_active) {
+            snapshot.display_names.push_back(device.m_display_name);
+          }
+        }
+      }
+
+      return snapshot;
     }
   }
+}  // namespace VDISPLAY_SUDOVDA
 
-  if (active_physical_displays.empty()) {
+bool VDISPLAY_SUDOVDA::has_active_physical_display() {
+  const auto physical = active_physical_displays();
+  if (!physical.enumeration_available) return true;
+
+  if (physical.display_names.empty()) {
     BOOST_LOG(debug) << "No active physical display found, returning false";
     return false;
   }
 
-  return platf::configured_capture_adapter_has_output(active_physical_displays);
+  return platf::configured_capture_adapter_has_output(physical.display_names);
 }
 
 bool VDISPLAY_SUDOVDA::should_auto_enable_virtual_display() {
@@ -5213,8 +5247,19 @@ VDISPLAY_SUDOVDA::ensure_display_result VDISPLAY_SUDOVDA::ensure_display(
   std::lock_guard<std::mutex> acquire_lock(g_ensure_display_acquire_mutex);
   ensure_display_result result;
 
-  if (!required_adapter_luid && has_active_physical_display()) {
-    result.readiness = ensure_display_readiness_e::existing_display;
+  const auto physical = active_physical_displays();
+  if (!physical.enumeration_available || !physical.display_names.empty()) {
+    if (!physical.enumeration_available || !required_adapter_luid ||
+        platf::adapter_drives_any_output(*required_adapter_luid, physical.display_names) != platf::adapter_output_match_e::no_match) {
+      result.readiness = ensure_display_readiness_e::existing_display;
+    } else {
+      BOOST_LOG(info)
+        << "Encoder probe deferred: the requested adapter has no active physical output, and host-owned probe displays are disabled while a physical desktop exists.";
+    }
+    return result;
+  }
+  if (!VDISPLAY::policy::should_create_host_probe_display()) {
+    BOOST_LOG(info) << "Encoder probe deferred until a requesting client owns a usable display.";
     return result;
   }
 
