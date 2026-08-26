@@ -5,8 +5,8 @@
 - **Repository**: [gabrielcruzg3/Vibepollo](https://github.com/gabrielcruzg3/Vibepollo) (Fork of [Nonary/Vibepollo](https://github.com/Nonary/Vibepollo))
 - **Active Branch**: `dev/agy` (tracks `origin/dev/agy`)
 - **Current Version**: `1.19.0-beta.3-agy` (Upstream baseline: `1.19.0-beta.3` — **Latest Upstream Release**)
-- **Draft Release on GitHub**: [`1.19.0-beta.3-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases)
 - **Published Releases**:
+  - [`1.19.0-beta.3-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-beta.3-agy) (Upstream `1.19.0-beta.3` — **Latest**)
   - [`1.19.0-beta.2-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-beta.2-agy) (Upstream `1.19.0-beta.2`)
   - [`1.19.0-beta.1-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-beta.1-agy) (Upstream `1.19.0-beta.1`)
   - [`1.19.0-alpha.2-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-alpha.2-agy) (Upstream `1.19.0-alpha.2`)
@@ -19,7 +19,7 @@
 ## 2. Upgrade & Synchronization Log
 
 ### Stepwise Upstream Progression
-Our fork follows upstream release tags step-by-step using the naming convention `{originalTag}-agy`:
+Our fork followed upstream release tags step-by-step using the naming convention `{originalTag}-agy`:
 
 | Version / Tag | Base Upstream Tag | Merge Status | Test Suite | Release Status |
 |---|---|---|---|---|
@@ -28,7 +28,7 @@ Our fork follows upstream release tags step-by-step using the naming convention 
 | `1.19.0-alpha.2-agy` | `1.19.0-alpha.2` | Clean Merge | 36/36 Passed (100%) | **Published** |
 | `1.19.0-beta.1-agy` | `1.19.0-beta.1` | Clean Merge + Config Catalog Mapping | 36/36 Passed (100%) | **Published** |
 | `1.19.0-beta.2-agy` | `1.19.0-beta.2` | Clean Merge + Linux Lossless Header Fix + Config Catalog Mapping | 36/36 Passed (100%) | **Published** |
-| **`1.19.0-beta.3-agy`** | **`1.19.0-beta.3`** | **Clean Merge (Latest Upstream Tag Reached!)** | **36/36 Passed (100%)** | **Draft / Ready for Testing** |
+| **`1.19.0-beta.3-agy`** | **`1.19.0-beta.3`** | **Clean Merge (Latest Upstream Tag Reached!)** | **36/36 Passed (100%)** | **Published (Latest)** |
 
 ---
 
@@ -114,22 +114,15 @@ mv build/cpack_artifacts/Vibepollo-assets.deb build/cpack_artifacts/Vibepollo-we
 
 ---
 
-## 5. Generated Release Packages (`1.19.0-beta.3-agy`)
+## 5. Release Packages (`1.19.0-beta.3-agy`)
 
-Located in `build/cpack_artifacts/`:
+Located in `build/cpack_artifacts/` and published on [GitHub Releases](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-beta.3-agy):
 
 | Artifact Name | Size | Contents |
 |---|---|---|
 | **`Vibepollo-standalone-1.19.0-beta.3-agy.deb`** | `19.8 MB` | Complete standalone installer containing core binary (`sunshine-1.19.0-beta.3-agy`), Web UI assets, systemd units, icons, and shaders. |
 | **`Vibepollo-core-1.19.0-beta.3-agy.deb`** | `14.8 MB` | Backend executable and system integration only (no Web UI assets). |
 | **`Vibepollo-web-1.19.0-beta.3-agy.deb`** | `5.0 MB` | Frontend Web UI assets only (`/usr/share/sunshine/web/`). |
-
-### Publishing Draft Release (When Ready)
-A draft release is staged on GitHub:
-```bash
-# To publish the draft release after testing:
-gh release edit 1.19.0-beta.3-agy --draft=false --repo gabrielcruzg3/Vibepollo
-```
 
 ---
 
