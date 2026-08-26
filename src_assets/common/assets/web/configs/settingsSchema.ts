@@ -8,7 +8,8 @@ export type SettingsFieldKind =
   | 'textarea'
   | 'mode-remapping'
   | 'display-recovery'
-  | 'command-preparations';
+  | 'command-preparations'
+  | 'server-commands';
 
 export interface SettingsOption {
   labelKey: string;
@@ -371,6 +372,11 @@ const remoteMonitorFields = (): SettingsField[] => [
     descriptionKey: 'ui.settings.fields.remote_monitor_disconnect_on_client_disconnect.description',
     platform: 'windows',
   }),
+  boolean('remote_monitor_terminate_on_first_request', {
+    labelKey: 'ui.settings.fields.remote_monitor_terminate_on_first_request.label',
+    descriptionKey: 'ui.settings.fields.remote_monitor_terminate_on_first_request.description',
+    platform: 'windows',
+  }),
 ];
 
 const everydayPacingFields = (): SettingsField[] => [
@@ -490,6 +496,32 @@ export const settingsCategories: SettingsCategory[] = [
               visibleWhen: { key: 'dd_config_revert_on_disconnect', equals: false },
             },
           ),
+        ],
+      },
+      {
+        id: 'everyday_automation',
+        fields: [
+          {
+            key: 'global_prep_cmd',
+            kind: 'command-preparations',
+            labelKey: 'config.global_prep_cmd',
+            descriptionKey: 'config.global_prep_cmd_desc',
+            stacked: true,
+          },
+          {
+            key: 'global_state_cmd',
+            kind: 'command-preparations',
+            labelKey: 'config.global_state_cmd',
+            descriptionKey: 'config.global_state_cmd_desc',
+            stacked: true,
+          },
+          {
+            key: 'server_cmd',
+            kind: 'server-commands',
+            labelKey: 'config.server_cmd',
+            descriptionKey: 'config.server_cmd_desc',
+            stacked: true,
+          },
         ],
       },
     ],
@@ -792,18 +824,6 @@ export const settingsCategories: SettingsCategory[] = [
         ],
       },
       {
-        id: 'host_commands',
-        fields: [
-          {
-            key: 'global_prep_cmd',
-            kind: 'command-preparations',
-            labelKey: 'config.global_prep_cmd',
-            descriptionKey: 'config.global_prep_cmd_desc',
-            stacked: true,
-          },
-        ],
-      },
-      {
         id: 'host_history',
         fields: [
           boolean('session_history_enabled'),
@@ -850,6 +870,7 @@ export const settingsDefaults: Record<string, unknown> = {
   remote_monitor_mute_audio: false,
   remote_monitor_disconnect_on_stream_end: false,
   remote_monitor_disconnect_on_client_disconnect: false,
+  remote_monitor_terminate_on_first_request: false,
   dd_virtual_display_scale: -1,
   frame_limiter_enable: false,
   frame_limiter_provider: 'auto',
@@ -929,6 +950,8 @@ export const settingsDefaults: Record<string, unknown> = {
   notify_pre_releases: false,
   min_log_level: 2,
   global_prep_cmd: [],
+  global_state_cmd: [],
+  server_cmd: [],
   session_history_enabled: true,
   session_history_ttl_days: 0,
   session_history_db_size_limit_mb: 0,

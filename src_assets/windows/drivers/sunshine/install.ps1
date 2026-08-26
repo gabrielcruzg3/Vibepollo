@@ -17,6 +17,7 @@ $infPath = Join-Path $scriptDir 'SunshineVirtualDisplayDriver.inf'
 $dllPath = Join-Path $scriptDir 'SunshineVirtualDisplayDriver.dll'
 $catPath = Join-Path $scriptDir 'SunshineVirtualDisplayDriver.cat'
 $certPath = Join-Path $scriptDir 'SunshineVirtualDisplayDriver.cer'
+$signPathSignerSubject = 'CN=SignPath Foundation, O=SignPath Foundation, L=Lewes, S=Delaware, C=US'
 $probePath = Join-Path $scriptDir 'virtualdisplay_probe.exe'
 $vulkanLayerDir = Join-Path $scriptDir 'vulkan-layer'
 $vulkanLayerDllPath = Join-Path $vulkanLayerDir 'VkLayer_sunshine_hdr.dll'
@@ -408,78 +409,32 @@ function Install-CertificateIfPresent {
     }
 }
 
-# Subject of the self-signed certificate older builds created and trusted. It
-# is matched by name because a production package no longer ships the .cer, so
-# there is nothing left on disk to read the thumbprint from.
-$legacySelfSignedSubject = 'CN=Sunshine Virtual Display Release Signing'
-
-# True when Windows would accept this catalog even if the bundled certificate
-# were not trusted at all: a real signature, from something that is not our own
-# self-signed certificate, chaining to a root the machine already trusts.
-#
-# This is what makes removing that root safe. Answer "no" and the old behaviour
-# is kept, so a locally built or not-yet-signed package still installs.
-function Test-CatalogTrustedIndependently {
+# Windows PnP needs a third-party driver publisher's end-entity certificate
+# in LocalMachine\TrustedPublisher to install its catalog without prompting.
+# Add only the expected, already-valid SignPath signer; local/test packages
+# continue using the bundled certificate path above.
+function Install-CatalogSignerCertificate {
     $signature = Get-AuthenticodeSignature -LiteralPath $catPath
-    if (-not $signature.SignerCertificate -or $signature.Status -ne 'Valid') {
-        return $false
-    }
-
     $signer = $signature.SignerCertificate
-    if ([string]::Equals($signer.Subject, $legacySelfSignedSubject, [System.StringComparison]::OrdinalIgnoreCase)) {
-        return $false
+    if (-not $signer -or $signature.Status -ne 'Valid') {
+        return
     }
-    if (Test-Path -LiteralPath $certPath -PathType Leaf) {
-        $bundled = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new([System.IO.File]::ReadAllBytes($certPath))
-        if ([string]::Equals($signer.Thumbprint, $bundled.Thumbprint, [System.StringComparison]::OrdinalIgnoreCase)) {
-            return $false
-        }
+    if (-not [string]::Equals($signer.Subject, $signPathSignerSubject, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return
     }
 
-    # Reject a chain that terminates at the legacy certificate, since that is
-    # still dependent on it whatever the leaf looks like. Only when the chain
-    # actually builds: Windows has already reported the signature valid, and a
-    # local Build() can fail for unrelated reasons such as an intermediate that
-    # is not cached, which must not be read as "still dependent".
-    $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
-    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
-    if ($chain.Build($signer) -and $chain.ChainElements.Count -gt 0) {
-        $root = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
-        if ([string]::Equals($root.Subject, $legacySelfSignedSubject, [System.StringComparison]::OrdinalIgnoreCase)) {
-            return $false
+    $store = [System.Security.Cryptography.X509Certificates.X509Store]::new('TrustedPublisher', 'LocalMachine')
+    try {
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+        $existing = $store.Certificates.Find([System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, $signer.Thumbprint, $false)
+        if ($existing.Count -eq 0) {
+            $store.Add($signer)
+            Write-Host '[SunshineVirtualDisplay] SignPath publisher certificate installed into LocalMachine\TrustedPublisher for silent driver installation.'
+        } else {
+            Write-Host '[SunshineVirtualDisplay] SignPath publisher certificate already present in LocalMachine\TrustedPublisher.'
         }
-    }
-    return $true
-}
-
-# Removes the self-signed certificate an older build installed. A self-signed
-# root can vouch for anything on the machine, so leaving one behind after it
-# has stopped being necessary is not a tidiness question.
-#
-# Matching is deliberately narrow: exact subject, and self-issued. A real
-# certificate that merely shares the name is left alone.
-function Remove-LegacySelfSignedCertificate {
-    foreach ($storeName in @('Root', 'TrustedPublisher')) {
-        $store = [System.Security.Cryptography.X509Certificates.X509Store]::new($storeName, 'LocalMachine')
-        try {
-            $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-            foreach ($candidate in @($store.Certificates)) {
-                if (-not [string]::Equals($candidate.Subject, $legacySelfSignedSubject, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    continue
-                }
-                if (-not [string]::Equals($candidate.Subject, $candidate.Issuer, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    continue
-                }
-                $store.Remove($candidate)
-                Write-Host "[SunshineVirtualDisplay] Removed the obsolete self-signed certificate from LocalMachine\$storeName."
-            }
-        } catch {
-            # Never fail an install over cleanup of a certificate that is no
-            # longer load-bearing.
-            Write-Warning "[SunshineVirtualDisplay] Could not clean LocalMachine\$storeName ($($_.Exception.Message))."
-        } finally {
-            $store.Close()
-        }
+    } finally {
+        $store.Close()
     }
 }
 
@@ -1195,27 +1150,13 @@ if ($Uninstall) {
     Remove-DriverPackage
     Remove-CertificateIfPresent -StoreName 'TrustedPublisher'
     Remove-CertificateIfPresent -StoreName 'Root'
-    # Covers a root left by an older build when the current package no longer
-    # ships the .cer that Remove-CertificateIfPresent reads its thumbprint from.
-    Remove-LegacySelfSignedCertificate
     Write-Host '[SunshineVirtualDisplay] Uninstall complete.'
     exit 0
 }
 
-# An upgrade is the moment to undo this. Older builds signed the catalog with
-# a self-signed certificate and installed it as a trusted root so Windows would
-# accept the driver. Once the catalog carries a signature that stands on its
-# own, that root buys nothing and is removed.
-#
-# The condition is deliberately the real one - "is this catalog already trusted
-# without us" - rather than a version check, so it cannot remove the trust a
-# package still depends on.
-if (Test-CatalogTrustedIndependently) {
-    Remove-LegacySelfSignedCertificate
-} else {
-    Install-CertificateIfPresent -StoreName 'Root'
-    Install-CertificateIfPresent -StoreName 'TrustedPublisher'
-}
+Install-CertificateIfPresent -StoreName 'Root'
+Install-CertificateIfPresent -StoreName 'TrustedPublisher'
+Install-CatalogSignerCertificate
 Register-VulkanLayer
 
 $driverPackageRefreshNeeded = Test-DriverPackageRefreshNeeded

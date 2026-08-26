@@ -180,6 +180,12 @@ namespace remote_session {
     }
   }
 
+  bool requires_termination_confirmation(const bool terminate_on_first_request, const bool caller_owns_active_game) {
+    // The original game client is not affected by the extra-client safety
+    // guard. The setting only opts secondary clients into the one-request path.
+    return !terminate_on_first_request && !caller_owns_active_game;
+  }
+
   terminate_confirmation_e arm_or_confirm_termination(
     const std::string_view client_uuid,
     const std::uint64_t generation,
@@ -216,6 +222,8 @@ namespace remote_session {
   bool uses_audio(const role_e role, const bool mute_remote_monitor) {
     return role != role_e::input && !(role == role_e::monitor && mute_remote_monitor);
   }
+
+  bool uses_host_audio(const role_e role) { return role == role_e::monitor; }
 
   bool disconnect_monitor_after_stream(
     const bool disconnect_on_stream_end,

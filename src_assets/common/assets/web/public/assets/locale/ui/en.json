@@ -388,6 +388,9 @@
         "allow_stream": "Allow this device to stream",
         "blocking_help": "Blocking a device keeps it paired but rejects future stream requests.",
         "common_display_summary": "Common virtual display mode: {mode}; layout: {layout}.",
+        "commands_description": "Optional connect and disconnect scripts for this device. Use these for automation and integrations; ordinary streaming does not need them.",
+        "commands_empty": "No commands configured yet. Use Add to create one.",
+        "remove_command": "Remove command {number}",
         "custom_settings": "Custom settings",
         "display_description": "Keep the common host settings or define a display route and stream presentation for this client.",
         "display_mode_invalid": "Use WIDTHxHEIGHTxFPS, for example 1920x1080x60.",
@@ -404,6 +407,7 @@
         "prefer_10bit_description": "When this client requests HDR, send a 10-bit SDR stream instead. HEVC or AV1 Main10 is required.",
         "route_target": "Route this client to",
         "sections": {
+          "commands": "Client automation",
           "display": "Display routing",
           "hdr": "HDR and presentation",
           "identity": "Identity and permissions"
@@ -1299,6 +1303,10 @@
       "categories_label": "Settings categories",
       "dependency_inactive": "Currently inactive because “{setting}” is off or uses another mode.",
       "description": "Start with the choices that shape every stream, then use the focused categories for less common configuration.",
+      "command_editor": {
+        "empty": "No commands configured yet. Use Add to create one.",
+        "remove": "Remove command {number}"
+      },
       "discard": "Discard",
       "display_recovery": {
         "action": "Clear display state",
@@ -1384,6 +1392,10 @@
         "remote_monitor_disconnect_on_client_disconnect": {
           "description": "Remove the extra monitor as soon as the client connection drops or you use Disconnect, even if the monitor was waiting for Resume.",
           "label": "Remove it when the client disconnects"
+        },
+        "remote_monitor_terminate_on_first_request": {
+          "description": "Moonlight needs Vibeshine to advertise the host as available to extra clients so it can show the running game and Terminate control. Leave this off to require launching Terminate twice; the original game client is not affected.",
+          "label": "Terminate on the first request"
         },
         "capture": {
           "description": "Automatic follows the capture backend Vibepollo already chooses for this Windows version. Override it only for compatibility or a specific pacing behavior.",
@@ -1514,6 +1526,10 @@
         },
         "everyday_access": {
           "title": "Where you can manage and connect"
+        },
+        "everyday_automation": {
+          "description": "Optional host scripting and automation for power users. Most setups can leave these controls alone.",
+          "title": "Automation & scripting"
         },
         "everyday_capture": {
           "title": "Capture, encoding, sound, and controllers"

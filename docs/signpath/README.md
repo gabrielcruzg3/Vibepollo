@@ -42,6 +42,28 @@ manual approval, each signing job waits up to 5 hours 45 minutes for approval
 and completion. Approve both requests in order: the MSI request first, followed
 by the setup-EXE request after the signed MSI has been embedded.
 
+## The Sunshine virtual-display catalog is signed in the MSI request
+
+The Sunshine virtual-display package historically used a self-signed catalog
+and installed its certificate into the machine trust stores. The MSI request
+now signs `drivers/sunshine/SunshineVirtualDisplayDriver.cat` itself. The
+catalog-bound `SunshineVirtualDisplayDriver.dll` is deliberately left byte-for-
+byte unchanged; signing that DLL would invalidate the catalog. The installer
+adds the exact SignPath publisher certificate to `TrustedPublisher` before PnP
+installation, while leaving existing legacy trust and unchanged driver
+payloads alone.
+
+The artifact configuration requires exactly one catalog match. This is
+intentional: a path mismatch must fail signing rather than publish an MSI that
+falls back to an interactive driver-install prompt.
+
+Windows PnP also requires the catalog's end-entity Authenticode certificate to
+be established in the local machine `TrustedPublisher` store for a silent
+third-party driver install. After validating the production catalog, the
+driver installer imports only the exact `SignPath Foundation` signer
+certificate there before invoking `pnputil`; it does not install a new root CA
+or trust an arbitrary catalog signer.
+
 A literal single request would require migrating off the custom bootstrapper to a
 **WiX Burn** bundle (which SignPath can deep-sign), losing the custom installer
 UX. That is intentionally out of scope.
@@ -123,8 +145,8 @@ invalidates the catalog hash and **breaks driver installation**. These must be
   deep-sign step must leave both bytes unchanged.
 - `nvngx_truehdr.dll` (NVIDIA RTX Video SDK runtime, downloaded from the pinned TrueHDR runtime release)
 
-The recommended config (Strategy 1 below) excludes these by enumerating only
-first-party files explicitly.
+The recommended config signs the Sunshine catalog and explicitly excludes the
+catalog-bound DLL and third-party binaries above.
 
 ## VHF gamepad release boundary
 
@@ -160,6 +182,8 @@ stripped in CI and never signed on the runner). The `msi-file-apollo` config is 
 | `playnite-launcher.exe` | `Apollo\tools\` |
 | `sunshine_wgc_capture.exe` | `Apollo\tools\` |
 | `sunshine_display_helper.exe` | `Apollo\tools\` |
+| `virtualdisplay_probe.exe` | `Apollo\drivers\sunshine\` |
+| `VkLayer_sunshine_hdr.dll` | `Apollo\drivers\sunshine\vulkan-layer\` |
 
 > The paths in the artifact-configuration XML must match the MSI's logical
 > directory layout. Confirm the exact in-MSI paths against a built MSI's File
@@ -172,9 +196,10 @@ first-party binaries when the pinned TrueHDR runtime bundle is included.
 ## Two ways to write the `msi-file-apollo` config
 
 - **Strategy 1 — explicit enumeration (recommended).** List each first-party PE
-  with an explicit `<pe-file>`. Never touches vendor/catalog files. Must be kept
-  in sync when a new shipping binary is added — the CI verification gate (below)
-  is the backstop that catches drift. This is what
+  with an explicit `<pe-file>`. It does not touch vendor or catalog-bound files;
+  the Sunshine catalog is the deliberate catalog exception and is listed as a
+  `<catalog-file>`. The list must be kept in sync when a new shipping binary is
+  added — the CI verification gate (below) is the backstop that catches drift. This is what
   [`msi-file-apollo.artifact-config.xml`](msi-file-apollo.artifact-config.xml) ships.
 - **Strategy 2 — scoped wildcards.** Use `<pe-file-set>` with `*`/`**` includes
   scoped to `Apollo\` and `Apollo\tools\` so the `drivers\` subtree is never swept in. Set
@@ -186,12 +211,15 @@ first-party binaries when the pinned TrueHDR runtime bundle is included.
 ## CI verification gate (drift backstop)
 
 `ci-windows.yml` runs a post-sign verification step (when SignPath is enabled)
-that fails the build if any first-party PE is unsigned. It:
+that fails the build if the virtual-display catalog is missing or unsigned, or
+if any first-party PE is unsigned. It:
 
 1. confirms the outer `VibepolloSetup.exe` is signed,
 2. confirms the signed MSI is signed,
-3. administratively extracts the MSI and confirms every first-party PE carries a
-   signature, while **skipping** the vendor/catalog files above.
+3. administratively extracts the MSI and confirms the Sunshine virtual-display
+   catalog carries a signature from SignPath Foundation,
+4. confirms every first-party PE carries a signature, while **skipping** the
+   vendor and catalog-bound files above.
 
 This catches a portal misconfiguration (e.g. a container-only `msi-file-apollo` config,
 or a newly added binary missing from Strategy-1 enumeration) before release.
@@ -199,7 +227,8 @@ or a newly added binary missing from Strategy-1 enumeration) before release.
 ## Portal setup checklist
 
 1. Create/confirm the `msi-file-apollo` artifact configuration matches
-   `msi-file-apollo.artifact-config.xml` (deep-signs first-party PEs, excludes vendors).
+   `msi-file-apollo.artifact-config.xml` (deep-signs first-party PEs and the Sunshine
+   virtual-display catalog, while excluding catalog-bound DLLs and vendors).
 2. Create/confirm the `setup-exe` artifact configuration matches
    `setup-exe.artifact-config.xml` (PE Authenticode).
 3. Confirm the GitHub trusted-build system is linked to project `Vibepollo`.

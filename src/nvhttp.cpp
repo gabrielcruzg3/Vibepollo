@@ -42,6 +42,7 @@
 #include <Simple-Web-Server/server_http.hpp>
 
 // local includes
+#include "app_display_policy.h"
 #include "config.h"
 #include "display_device.h"
 #include "display_helper_integration.h"
@@ -145,6 +146,18 @@ namespace nvhttp {
 
   void notify_remote_input_transport_lost(const std::string_view client_uuid, const std::uint64_t generation) {
     forget_remote_owner(client_uuid, remote_session::role_e::input, generation);
+    const bool has_stream_activity =
+      rtsp_stream::has_pending_launch_or_startup() ||
+      rtsp_stream::session_count_no_cleanup() > 0 ||
+      stream::session::running_sessions.load(std::memory_order_acquire) != 0 ||
+      stream::session::teardown_sessions.load(std::memory_order_acquire) != 0 ||
+      webrtc_stream::has_active_or_pending_sessions() ||
+      webrtc_stream::has_capture_active() ||
+      webrtc_stream::has_teardown_in_progress();
+    if (!has_stream_activity && remote_display_topology::instance().managed_client_identity_count() == 0) {
+      config::clear_runtime_config_overrides();
+      config::apply_config_now();
+    }
   }
 
   void notify_remote_monitor_released(const std::string_view client_uuid, const std::uint64_t generation) {
@@ -685,13 +698,17 @@ namespace nvhttp {
       };
 
       std::optional<std::string> app_output_override;
+      auto app_display_override = proc::display_policy::app_override_e::inherit;
       if (launch_session->output_name_override) {
         app_output_override = boost::algorithm::trim_copy(*launch_session->output_name_override);
       }
 
       if (app_output_override && !app_output_override->empty() && VDISPLAY::is_virtual_display_selection(*app_output_override)) {
         launch_session->virtual_display = true;
+        app_display_override = proc::display_policy::app_override_e::virtual_display;
         app_output_override.reset();
+      } else if (app_output_override) {
+        app_display_override = proc::display_policy::app_override_e::physical;
       }
       launch_session->virtual_display_recreated_on_demand = false;
       launch_session->virtual_display_needs_resume_apply = false;
@@ -709,10 +726,11 @@ namespace nvhttp {
       const bool session_requests_virtual = launch_session->app_metadata && launch_session->app_metadata->virtual_screen;
       const bool launch_requests_physical = launch_session->client_virtual_display_override &&
                                             !*launch_session->client_virtual_display_override;
-      bool request_virtual_display =
-        launch_session->virtual_display ||
+      bool request_virtual_display = proc::display_policy::resolve_virtual_display_request(
         (config_requests_virtual && !launch_requests_physical) ||
-        client_requests_virtual || session_requests_virtual || forced_sudavda_virtual_display;
+          launch_session->virtual_display || session_requests_virtual || forced_sudavda_virtual_display,
+        app_display_override
+      ) || client_requests_virtual;
       const auto requested_virtual_display_mode =
         launch_session->virtual_display_mode_override.value_or(config::video.virtual_display_mode);
       const bool shared_virtual_display_mode =
@@ -2015,6 +2033,12 @@ namespace nvhttp {
     std::mutex launch_request_mutex;
     remote_session::normal_app_transition_gate_t normal_http_app_transition_mutex;
     std::mutex stream_lifecycle_gate;
+
+    namespace {
+      std::mutex force_stop_dispatch_mutex;
+      thread_pool_util::ThreadPool *force_stop_dispatch_pool = nullptr;
+      std::atomic_bool force_stop_pending = false;
+    }
 
     std::mutex &stream_lifecycle_mutex() {
       return stream_lifecycle_gate;
@@ -3427,7 +3451,11 @@ namespace nvhttp {
           app_node.put("UUID", entry.uuid);
           app_node.put("IDX", configured == configured_apps.end() ? "0" : configured->idx);
           app_node.put("ID", entry.id);
-          app_node.put("ArtVersion", entry.synthetic ? "remote-session-v6" : (configured == configured_apps.end() ? "" : configured->art_version));
+          app_node.put(
+            "ArtVersion",
+            entry.synthetic ? (configured == configured_apps.end() ? "remote-session-v6" : configured->art_version) :
+                              (configured == configured_apps.end() ? "" : configured->art_version)
+          );
 
           apps.push_back(std::make_pair("App", std::move(app_node)));
         }
@@ -3536,18 +3564,30 @@ namespace nvhttp {
           return;
         }
         if (decision.terminate) {
-          const auto confirmation = remote_session::arm_or_confirm_termination(request_client_identity.uuid, game.generation, game.app.id);
-          if (confirmation == remote_session::terminate_confirmation_e::prompt) {
-            BOOST_LOG(info) << "Terminate confirmation armed for client " << request_client_identity.uuid
+          const bool caller_owns_active_game = !game.owner_uuid.empty() && request_client_identity.uuid == game.owner_uuid;
+          if (remote_session::requires_termination_confirmation(
+                config::video.remote_monitor_terminate_on_first_request,
+                caller_owns_active_game
+              )) {
+            const auto confirmation = remote_session::arm_or_confirm_termination(request_client_identity.uuid, game.generation, game.app.id);
+            if (confirmation == remote_session::terminate_confirmation_e::prompt) {
+              BOOST_LOG(info) << "Terminate confirmation armed for client " << request_client_identity.uuid
+                              << " (app=" << game.app.id << ", generation=" << game.generation << ").";
+              tree.put("root.resume", 0);
+              tree.put("root.gamesession", 0);
+              tree.put("root.<xmlattr>.status_code", 410);
+              tree.put("root.<xmlattr>.status_message", std::string {remote_session::termination_confirmation_message()});
+              return;
+            }
+            BOOST_LOG(info) << "Terminate confirmation accepted for client " << request_client_identity.uuid
                             << " (app=" << game.app.id << ", generation=" << game.generation << ").";
-            tree.put("root.resume", 0);
-            tree.put("root.gamesession", 0);
-            tree.put("root.<xmlattr>.status_code", 410);
-            tree.put("root.<xmlattr>.status_message", std::string {remote_session::termination_confirmation_message()});
-            return;
+          } else {
+            // Do not let a previous guarded request survive a configuration
+            // change or an owner request and confirm a later extra-client launch.
+            remote_session::clear_termination_confirmation(request_client_identity.uuid);
+            BOOST_LOG(info) << "Terminate accepted on the first request for client " << request_client_identity.uuid
+                            << (caller_owns_active_game ? " (active-game owner)." : " (configured first-request mode).");
           }
-          BOOST_LOG(info) << "Terminate confirmation accepted for client " << request_client_identity.uuid
-                          << " (app=" << game.app.id << ", generation=" << game.generation << ").";
           const bool disconnected = rtsp_stream::disconnect_game_sessions(true);
           // Role-scoped transport teardown deliberately preserves Remote Monitor
           // and Remote Input, but it does not end the configured application.
@@ -3627,11 +3667,81 @@ namespace nvhttp {
           return;
         }
 
+        std::unique_lock normal_transition_lock {normal_http_app_transition_mutex};
+        const bool no_active_sessions = !has_stream_session_activity();
+        const auto runtime_app = proc::proc.resolve_app(
+          "0",
+          remote_session::synthetic(
+            synthetic_control == remote_session::control_e::input ? remote_session::control_e::input : remote_session::control_e::monitor
+          ).uuid
+        );
+        auto client_settings = verified_client;
+        if (!client_settings && !request_client_identity.uuid.empty()) {
+          client_settings = get_client_snapshot_by_uuid(request_client_identity.uuid);
+        }
+        std::unordered_map<std::string, std::string> requested_runtime_overrides;
+        if (runtime_app) {
+          config::merge_config_overrides(requested_runtime_overrides, runtime_app->config_overrides);
+        }
+        if (client_settings) {
+          config::merge_config_overrides(requested_runtime_overrides, client_settings->config_overrides);
+        }
+        if (!no_active_sessions &&
+            !config::adapter_config_overrides_compatible_with_active(requested_runtime_overrides)) {
+          tree.put("root.resume", 0);
+          tree.put("root.<xmlattr>.status_code", 400);
+          tree.put("root.<xmlattr>.status_message", "Another stream is active with a different capture adapter selection");
+          return;
+        }
+
+        auto previous_runtime_overrides = config::runtime_config_overrides_snapshot();
+        bool runtime_overrides_applied = false;
+        bool keep_runtime_overrides = false;
+        auto runtime_overrides_guard = util::fail_guard([&]() {
+          if (!runtime_overrides_applied || keep_runtime_overrides) {
+            return;
+          }
+          config::set_runtime_config_overrides(std::move(previous_runtime_overrides));
+          if (!has_stream_session_activity()) {
+            config::apply_config_now();
+          } else {
+            config::mark_deferred_reload();
+          }
+        });
+
+        if (no_active_sessions) {
+          try {
+            auto overrides = requested_runtime_overrides;
+#ifdef _WIN32
+            if (client_settings &&
+                !client_settings->hdr_profile.empty() &&
+                !overrides.contains("rtx_hdr_peak_brightness")) {
+              if (const auto profile_peak = VDISPLAY::hdr_profile_peak_luminance_nits(client_settings->hdr_profile)) {
+                overrides.insert_or_assign("rtx_hdr_peak_brightness", std::to_string(std::clamp<std::uint32_t>(*profile_peak, 400, 2000)));
+              }
+            }
+#endif
+            config::set_runtime_config_overrides(std::move(overrides));
+            runtime_overrides_applied = true;
+            config::apply_config_now();
+          } catch (...) {
+            config::set_runtime_config_overrides(previous_runtime_overrides);
+            config::apply_config_now();
+            runtime_overrides_applied = false;
+            throw;
+          }
+        }
+
+        auto _hot_apply_gate = config::acquire_apply_read_gate();
+        if (no_active_sessions) {
+          config::record_active_adapter_config();
+        }
+
         auto launch_session = make_launch_session_from_snapshot(false, false, args, verified_client, &request_client_identity);
         launch_session->rtsp_source_address = request->remote_endpoint().address().to_string();
         launch_session->role_generation = launch_session->id;
         launch_session->role = synthetic_control == remote_session::control_e::input ? remote_session::role_e::input : remote_session::role_e::monitor;
-        launch_session->host_audio = false;
+        launch_session->host_audio = remote_session::uses_host_audio(launch_session->role);
         launch_session->continuous_audio = false;
         if (launch_session->role == remote_session::role_e::input) {
           launch_session->client_do_cmds.clear();
@@ -3657,6 +3767,7 @@ namespace nvhttp {
           BOOST_LOG(info) << "Remote Monitor exact capture target for client '" << request_client_identity.uuid
                           << "' is '" << monitor.output << "'.";
         }
+        stream::session::arm_shared_runtime_cleanup(launch_session->virtual_display_guid_bytes);
         if (!rtsp_stream::launch_session_raise(launch_session)) {
           if (launch_session->role == remote_session::role_e::monitor) {
             remote_session::release_monitor(request_client_identity.uuid, launch_session->role_generation, "RTSP admission rejected");
@@ -3667,6 +3778,7 @@ namespace nvhttp {
           tree.put("root.<xmlattr>.status_message", "RTSP pending session admission was rejected");
           return;
         }
+        keep_runtime_overrides = true;
         if (launch_session->role != remote_session::role_e::monitor) {
           remember_remote_owner(request_client_identity.uuid, launch_session->role, launch_session->role_generation);
         }
@@ -4609,6 +4721,77 @@ namespace nvhttp {
 #endif
   }
 
+  namespace {
+    void terminate_streams_and_app(
+      const bool immediate,
+      const bool preserve_deferred_launch,
+      const bool terminate_app
+    ) {
+      rtsp_stream::terminate_sessions(preserve_deferred_launch);
+
+      if (terminate_app && !preserve_deferred_launch) {
+        proc::proc.terminate(immediate);
+      }
+
+#ifdef _WIN32
+      // Session joins complete before this final owner check. Any display
+      // cleanup that remains is therefore ordered after transport teardown.
+      cleanup_virtual_display_if_idle();
+#endif
+    }
+
+    void run_force_stop() {
+      std::lock_guard launch_lock {launch_request_mutex};
+
+#ifdef _WIN32
+      // Keep this request visible as one cleanup operation while it cancels
+      // recovery, drains RTSP, terminates the app, and removes the display.
+      stream::session::cleanup_reservation_t cleanup_reservation;
+      VDISPLAY::cancel_all_virtual_display_recovery_monitors();
+#endif
+
+      // Force Close is a host-side lifecycle action, so it must close either
+      // transport before the process/display teardown, not just classic RTSP.
+      webrtc_stream::shutdown_all_sessions();
+      BOOST_LOG(info) << "Force stop: terminating streaming sessions before app and display teardown."sv;
+      terminate_streams_and_app(true, false, true);
+    }
+  }  // namespace
+
+  void request_force_stop() {
+    bool expected = false;
+    if (!force_stop_pending.compare_exchange_strong(expected, true)) {
+      BOOST_LOG(debug) << "Force stop is already pending."sv;
+      return;
+    }
+
+    try {
+      std::lock_guard dispatch_lock {force_stop_dispatch_mutex};
+      if (!force_stop_dispatch_pool) {
+        force_stop_pending.store(false, std::memory_order_release);
+        BOOST_LOG(warning) << "Force stop request dropped because the blocking lifecycle worker is unavailable."sv;
+        return;
+      }
+
+      force_stop_dispatch_pool->push([]() {
+        try {
+          run_force_stop();
+        } catch (const std::exception &e) {
+          BOOST_LOG(error) << "Force stop teardown failed: " << e.what();
+        } catch (...) {
+          BOOST_LOG(error) << "Force stop teardown failed with an unknown exception.";
+        }
+        force_stop_pending.store(false, std::memory_order_release);
+      });
+    } catch (const std::exception &e) {
+      force_stop_pending.store(false, std::memory_order_release);
+      BOOST_LOG(error) << "Could not queue Force stop teardown: " << e.what();
+    } catch (...) {
+      force_stop_pending.store(false, std::memory_order_release);
+      BOOST_LOG(error) << "Could not queue Force stop teardown due to an unknown exception.";
+    }
+  }
+
   void cancel(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
 
@@ -4662,20 +4845,7 @@ namespace nvhttp {
 #else
     constexpr bool preserve_deferred_launch = false;
 #endif
-    rtsp_stream::terminate_sessions(preserve_deferred_launch);
-
-    if (has_running_app && !preserve_deferred_launch) {
-      proc::proc.terminate();
-    }
-    // The config needs to be reverted regardless of whether "proc::proc.terminate()" was called or not.
-
-#ifdef _WIN32
-
-    // RTSP session termination above is synchronous, so by the time we reach
-    // this point the old session threads have already completed their joins.
-    cleanup_virtual_display_if_idle();
-
-#endif
+    terminate_streams_and_app(false, preserve_deferred_launch, has_running_app);
   }
 
   void appasset(resp_https_t response, req_https_t request) {
@@ -4936,6 +5106,10 @@ namespace nvhttp {
     http_server_t http_server;
     thread_pool_util::ThreadPool blocking_route_pool;
     blocking_route_pool.start(1);
+    {
+      std::lock_guard dispatch_lock {force_stop_dispatch_mutex};
+      force_stop_dispatch_pool = &blocking_route_pool;
+    }
     // Discovery routes are observation-only, so they must not queue behind the mutating
     // routes. A launch/resume/cancel handler can hold the lifecycle gate across unbounded
     // work, and on a single FIFO worker that made the host undiscoverable until restart.
@@ -5146,6 +5320,10 @@ namespace nvhttp {
 
     ssl.join();
     tcp.join();
+    {
+      std::lock_guard dispatch_lock {force_stop_dispatch_mutex};
+      force_stop_dispatch_pool = nullptr;
+    }
     blocking_route_pool.stop();
     blocking_route_pool.join();
     discovery_route_pool.stop();

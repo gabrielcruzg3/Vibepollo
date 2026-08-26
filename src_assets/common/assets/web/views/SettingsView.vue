@@ -6,6 +6,7 @@ import { apiGet, apiPatch, apiPost } from '@/api/client';
 import DisplayModeOverrides from '@/components/settings/DisplayModeOverrides.vue';
 import DisplayRecoverySettings from '@/components/settings/DisplayRecoverySettings.vue';
 import GlobalPrepCommands from '@/components/settings/GlobalPrepCommands.vue';
+import ServerCommands from '@/components/settings/ServerCommands.vue';
 import SettingsIntegrationPath from '@/components/settings/SettingsIntegrationPath.vue';
 import { InlineAlert, LoadingSkeleton, PageHeader, StatusBadge, UiIcon } from '@/components/ui';
 import {
@@ -17,6 +18,7 @@ import {
   type SettingsOption,
   type SettingsVisibility,
 } from '@/configs/settingsSchema';
+import { serializeCommandRows, serializeServerCommandRows } from '@/utils/v2Parity';
 
 const { locale, t, te } = useI18n();
 
@@ -441,6 +443,11 @@ function fieldDescription(field: SettingsField): string {
   return key ? t(key) : '';
 }
 
+function fieldUsesCustomEditor(field: SettingsField): boolean {
+  const kind = String(field.kind);
+  return kind === 'command-preparations' || kind === 'server-commands';
+}
+
 function optionText(option: SettingsOption, fieldKey = ''): string {
   if (!option.value && fieldKey === 'capture') return automaticCaptureLabel.value;
   if (!option.value && fieldKey === 'encoder') return automaticEncoderLabel.value;
@@ -543,6 +550,21 @@ function updateValue(key: string, event: Event, field?: SettingsField): void {
     (field?.kind === 'number' || field?.kind === 'duration') && raw !== '' ? Number(raw) : raw;
 }
 
+function saveValue(key: string): unknown {
+  const value = values[key];
+  if (key === 'global_prep_cmd' || key === 'global_state_cmd') {
+    return serializeCommandRows(value, hostPlatform.value).filter(
+      (row) => row.do.trim() || row.undo.trim(),
+    );
+  }
+  if (key === 'server_cmd') {
+    return serializeServerCommandRows(value, hostPlatform.value).filter(
+      (row) => row.name.trim() && row.cmd.trim(),
+    );
+  }
+  return value === '' ? null : value;
+}
+
 function normalizeConfiguredValues(configured: Record<string, unknown>): Record<string, unknown> {
   const normalized = { ...configured };
   const logLevels: Record<string, number> = {
@@ -638,9 +660,7 @@ async function save(): Promise<void> {
   error.value = '';
   notice.value = '';
   try {
-    const patch = Object.fromEntries(
-      dirtyKeys.value.map((key) => [key, values[key] === '' ? null : values[key]]),
-    );
+    const patch = Object.fromEntries(dirtyKeys.value.map((key) => [key, saveValue(key)]));
     const result = await apiPatch<SaveResult>('/api/config', patch);
     original.value = cloneSettings(values);
     restartAvailable.value = Boolean(result.restartRequired);
@@ -813,10 +833,11 @@ onMounted(() => void load());
                     </span>
                   </div>
 
-                  <label
+                  <component
+                    :is="fieldUsesCustomEditor(field) ? 'div' : 'label'"
                     v-else-if="field.kind !== 'display-recovery'"
                     class="settings-row__copy"
-                    :for="`setting-${field.key}`"
+                    :for="fieldUsesCustomEditor(field) ? undefined : `setting-${field.key}`"
                   >
                     <span class="settings-row__label">
                       {{ fieldLabel(field) }}
@@ -844,7 +865,7 @@ onMounted(() => void load());
                     <span v-if="dependencyHint(field)" class="settings-row__dependency">
                       {{ dependencyHint(field) }}
                     </span>
-                  </label>
+                  </component>
 
                   <label v-if="field.kind === 'boolean'" class="vs-switch">
                     <input
@@ -906,6 +927,13 @@ onMounted(() => void load());
 
                   <GlobalPrepCommands
                     v-else-if="field.kind === 'command-preparations'"
+                    :model-value="values[field.key]"
+                    :platform="hostPlatform"
+                    @update:model-value="values[field.key] = $event"
+                  />
+
+                  <ServerCommands
+                    v-else-if="field.kind === 'server-commands'"
                     :model-value="values[field.key]"
                     :platform="hostPlatform"
                     @update:model-value="values[field.key] = $event"
