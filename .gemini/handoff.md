@@ -217,14 +217,14 @@ EOF
 
 ---
 
-### Step 6: NVIDIA Headless Virtual Display Setup (No Physical Monitor Needed)
-When no physical monitor is powered on or connected, the NVIDIA driver powers down display pipelines. Configure a persistent virtual 1080p display buffer:
+### Step 6: NVIDIA Headless & Virtual Dual-Display Setup (Extended Desktop)
+To enable both a primary headless monitor and a virtual extended second screen on NVIDIA X11:
 
 ```bash
 # 1. Extract EDID binary from active display (or use existing EDID)
 sudo cp /sys/class/drm/card1-HDMI-A-1/edid /etc/X11/edid.bin
 
-# 2. Create NVIDIA headless Xorg configuration
+# 2. Create NVIDIA dual-screen Xorg configuration
 sudo tee /etc/X11/xorg.conf.d/10-headless.conf << 'EOF'
 Section "ServerLayout"
     Identifier     "Layout0"
@@ -236,8 +236,8 @@ Section "Device"
     Driver         "nvidia"
     VendorName     "NVIDIA Corporation"
     Option         "AllowEmptyInitialConfiguration" "True"
-    Option         "ConnectedMonitor" "DFP-0"
-    Option         "CustomEDID" "DFP-0:/etc/X11/edid.bin"
+    Option         "ConnectedMonitor" "DFP-0, DFP-1"
+    Option         "CustomEDID" "DFP-1:/etc/X11/edid.bin"
     Option         "HardDPMS" "false"
 EndSection
 
@@ -246,8 +246,7 @@ Section "Screen"
     Device         "Device0"
     Monitor        "Monitor0"
     DefaultDepth    24
-    Option         "UseDisplayDevice" "DFP-0"
-    Option         "MetaModes" "1920x1080_60 +0+0"
+    Option         "MetaModes" "DFP-0: 1920x1080 +0+0, DFP-1: 1920x1080 +1920+0"
     SubSection     "Display"
         Depth       24
         Modes      "1920x1080"
@@ -257,15 +256,38 @@ EndSection
 Section "Monitor"
     Identifier     "Monitor0"
     VendorName     "Unknown"
-    ModelName      "Headless-1080p"
+    ModelName      "DualScreen"
     Option         "DPMS" "false"
 EndSection
 EOF
+
+# 3. Remove any obsolete monolithic /etc/X11/xorg.conf
+sudo rm -f /etc/X11/xorg.conf
 ```
+
+> [!WARNING]
+> **Disclaimer on Session Reloads & Reboots**:
+> Removing `/etc/X11/xorg.conf` or altering multi-monitor layouts while an active KDE Plasma/X11 desktop session is running can cause Plasma or KWin to hang if only SDDM is restarted mid-session (`sudo systemctl restart sddm`). Always perform a full system reboot (`sudo reboot`) to cleanly initialize the virtual display pipelines and auto-login smoothly.
 
 ---
 
-### Step 7: Service Management Commands
+### Step 7: Configuring Multi-Display Streaming in Sunshine Web UI
+
+Once the virtual dual-display configuration is active, Sunshine detects:
+- **`HDMI-0 (id: 0)`**: Primary display (+0+0)
+- **`DP-0 (id: 1)`**: Virtual extended secondary display (+1920+0)
+
+In Sunshine Web UI (`https://<HOST-IP>:47990` -> **Applications**):
+- **Desktop App (Primary Screen)**: Uses default (`id: 0`).
+- **Second Monitor App (Extended Screen)**:
+  - Create or edit an application named `Second Monitor`.
+  - Under **Setting Overrides** -> select **`Display Id`** (key: `output_name`).
+  - Set value to `1`.
+  - Save.
+
+---
+
+### Step 8: Service Management Commands
 
 | Operation | Command |
 |---|---|
@@ -274,3 +296,4 @@ EOF
 | **Restart Service** | `systemctl --user restart sunshine` |
 | **Stop Service** | `systemctl --user stop sunshine` |
 | **Web UI Access** | `https://<HOST-IP>:47990` |
+
