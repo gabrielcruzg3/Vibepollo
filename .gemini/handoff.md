@@ -4,15 +4,34 @@
 
 - **Repository**: [gabrielcruzg3/Vibepollo](https://github.com/gabrielcruzg3/Vibepollo) (Fork of [Nonary/Vibepollo](https://github.com/Nonary/Vibepollo))
 - **Active Branch**: `dev/agy` (tracks `origin/dev/agy`)
-- **Published Release**: [`v1.18.4-agy.1`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/v1.18.4-agy.1) (Includes safety/own-risk disclaimer for unofficial binary packages)
+- **Current Version**: `1.19.0-alpha.1-agy` (Upstream baseline: `1.19.0-alpha.1`)
+- **Draft Release on GitHub**: [`1.19.0-alpha.1-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases)
+- **Previous Release**: [`v1.18.4-agy.1`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/v1.18.4-agy.1)
 - **Local Directory**: `/home/g3/Vibepollo`
 
 ---
 
-## 2. Technical Summary of Applied Fixes
+## 2. Upgrade & Synchronization Log
+
+### Stepwise Upstream Progression
+Our fork follows upstream release tags step-by-step using the naming convention `{originalTag}-agy`:
+
+| Version / Tag | Base Upstream Tag | Merge Status | Test Suite | Release Status |
+|---|---|---|---|---|
+| `v1.18.4-agy.1` | `1.18.4-stable.2` | Initial fork base | 33/33 Passed | Published |
+| **`1.19.0-alpha.1-agy`** | **`1.19.0-alpha.1`** | **Clean Merge + Locale Contract Fix** | **36/36 Passed (100%)** | **Draft / Ready for Testing** |
+| *Next*: `1.19.0-alpha.2-agy` | `1.19.0-alpha.2` | *Pending* | - | - |
+| *Next*: `1.19.0-beta.1-agy` | `1.19.0-beta.1` | *Pending* | - | - |
+| *Next*: `1.19.0-beta.2-agy` | `1.19.0-beta.2` | *Pending* | - | - |
+| *Next*: `1.19.0-beta.3-agy` | `1.19.0-beta.3` | *Pending* | - | - |
+
+---
+
+## 3. Technical Summary of Applied Fixes
 
 | Modified File | Root Cause & Issue | Resolution Applied |
 |---|---|---|
+| [src_assets/.../en.json](file:///home/g3/Vibepollo/src_assets/common/assets/web/public/assets/locale/en.json#L946-L950) | In `1.19.0-alpha.1`, upstream added `rtss_allow_virtual_display_override` to `src/config.cpp` and `ui/en.json`, but omitted it from the `config` dictionary in `en.json`. This caused `test_component_resource_config_catalog` to fail. | Added `"rtss_allow_virtual_display_override": "Allow non-Reflex RTSS modes on virtual displays"` under `"config"` in `en.json`, bringing CTest suite to 100% passing (36/36). |
 | [cmake/compile_definitions/linux.cmake](file:///home/g3/Vibepollo/cmake/compile_definitions/linux.cmake#L359-L373) | Obsolete glad v1 source file paths in `PLATFORM_TARGET_FILES`; duplicate entry with syntax error. | Cleaned up `PLATFORM_TARGET_FILES` to only reference existing platform sources. Glad v2 is dynamically generated into static libs via [glad.cmake](file:///home/g3/Vibepollo/cmake/dependencies/glad.cmake). |
 | [cmake/packaging/linux.cmake](file:///home/g3/Vibepollo/cmake/packaging/linux.cmake#L69-L72) | `CPACK_DEB_COMPONENT_INSTALL` was hardcoded to `ON`, preventing single standalone package creation. | Added conditional `if(NOT DEFINED CPACK_DEB_COMPONENT_INSTALL)` so monolithic packaging can be enabled with `-DCPACK_DEB_COMPONENT_INSTALL=OFF`. |
 | [src/nvenc/nvenc_config.h](file:///home/g3/Vibepollo/src/nvenc/nvenc_config.h#L15-L20) | In GCC 14, `split_encode_mode` enum name collided with struct member variable under `-Wchanges-meaning`. | Renamed `enum class split_encode_mode` to `split_encode_mode_e` with type alias `using split_encode_mode = split_encode_mode_e;`. |
@@ -27,7 +46,7 @@
 
 ---
 
-## 3. Build & Test Commands
+## 4. Build, Test & Packaging Commands
 
 From `/home/g3/Vibepollo`:
 
@@ -36,6 +55,7 @@ From `/home/g3/Vibepollo`:
 export PATH="/usr/local/cuda-13.1/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 export CC=gcc-14
 export CXX=g++-14
+export BUILD_VERSION=1.19.0-alpha.1-agy
 
 cmake -B build -G Ninja -S . \
   -DBUILD_TESTS=ON \
@@ -55,82 +75,52 @@ cmake -B build -G Ninja -S . \
 
 ### Step 2: Build Web UI & Sunshine Binaries
 ```bash
-# Build Vue/Vite frontend assets
+# 1. Build Vue/Vite frontend assets
 ninja -C build web_ui
 
-# Build core binaries and test targets with memory limit (peak ~8-10 GB)
+# 2. Build core binaries and test targets with memory limit (peak ~8-10 GB)
 ninja -C build -j2
 ```
 
 ### Step 3: Run Full Test Suite (100% Passing)
 ```bash
 ctest --test-dir build --output-on-failure
+# 100% tests passed, 0 tests failed out of 36
 ```
 
 ### Step 4: Generate `.deb` Packages
 ```bash
+mkdir -p build/cpack_artifacts
+
 # Generate standalone (all-in-one) package
 cmake -B build -DCPACK_DEB_COMPONENT_INSTALL=OFF
 cpack -G DEB --config build/CPackConfig.cmake
-# Generated: build/cpack_artifacts/Vibepollo.deb (18.79 MB)
+mv build/cpack_artifacts/Vibepollo.deb build/cpack_artifacts/Vibepollo-standalone-1.19.0-alpha.1-agy.deb
 
 # Generate split packages (core & web assets separately)
 cmake -B build -DCPACK_DEB_COMPONENT_INSTALL=ON
 cpack -G DEB --config build/CPackConfig.cmake
-# Generated:
-#   build/cpack_artifacts/Vibepollo-Unspecified.deb (13.82 MB core)
-#   build/cpack_artifacts/Vibepollo-assets.deb (4.96 MB web)
+mv build/cpack_artifacts/Vibepollo-Unspecified.deb build/cpack_artifacts/Vibepollo-core-1.19.0-alpha.1-agy.deb
+mv build/cpack_artifacts/Vibepollo-assets.deb build/cpack_artifacts/Vibepollo-web-1.19.0-alpha.1-agy.deb
 ```
 
 ---
 
-## 4. Release Packages on GitHub
+## 5. Generated Release Packages (`1.19.0-alpha.1-agy`)
 
-The release [`v1.18.4-agy.1`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/v1.18.4-agy.1) is published with three artifacts:
+Located in `build/cpack_artifacts/`:
 
 | Artifact Name | Size | Contents |
 |---|---|---|
-| **`Vibepollo-standalone-1.18.4-agy.1.deb`** | `18.79 MB` | Complete standalone installer containing core binary, Web UI assets, systemd units, icons, and shaders. |
-| **`Vibepollo-core-1.18.4-agy.1.deb`** | `13.82 MB` | Backend executable and system integration only (no Web UI assets). |
-| **`Vibepollo-web-1.18.4-agy.1.deb`** | `4.96 MB` | Frontend Web UI assets only (`/usr/share/sunshine/web/`). |
+| **`Vibepollo-standalone-1.19.0-alpha.1-agy.deb`** | `19.8 MB` | Complete standalone installer containing core binary (`sunshine-1.19.0-alpha.1-agy`), Web UI assets, systemd units, icons, and shaders. |
+| **`Vibepollo-core-1.19.0-alpha.1-agy.deb`** | `14.8 MB` | Backend executable and system integration only (no Web UI assets). |
+| **`Vibepollo-web-1.19.0-alpha.1-agy.deb`** | `5.0 MB` | Frontend Web UI assets only (`/usr/share/sunshine/web/`). |
 
----
-
-## 5. Fork Maintenance & Upstream Synchronization
-
-### Configured Remotes
-- **`origin`**: `https://github.com/gabrielcruzg3/Vibepollo.git` (Your Fork)
-- **`upstream`**: `https://github.com/Nonary/Vibepollo.git` (Direct Parent Upstream)
-- **`upstream-apollo`**: `https://github.com/ClassicOldSong/Apollo.git` (Original Apollo Upstream)
-
-### Syncing Updates from Upstream
-To pull upstream commits from `Nonary/Vibepollo` and rebase `dev/agy`:
-
+### Publishing Draft Release (When Ready)
+A draft release is staged on GitHub:
 ```bash
-# 1. Fetch latest changes
-git fetch upstream
-
-# 2. Update local master
-git checkout master
-git merge upstream/master --ff-only
-
-# 3. Update fork master on GitHub
-git push origin master
-
-# 4. Rebase your development branch
-git checkout dev/agy
-git rebase master
-
-# 5. Push updated dev branch to your fork
-git push origin dev/agy --force-with-lease
-```
-
-Or via GitHub CLI:
-```bash
-gh repo sync gabrielcruzg3/Vibepollo --source Nonary/Vibepollo
-git checkout dev/agy
-git pull --rebase origin master
-git push origin dev/agy --force-with-lease
+# To publish the draft release after testing:
+gh release edit 1.19.0-alpha.1-agy --draft=false --repo gabrielcruzg3/Vibepollo
 ```
 
 ---
@@ -283,4 +273,3 @@ EOF
 | **Restart Service** | `systemctl --user restart sunshine` |
 | **Stop Service** | `systemctl --user stop sunshine` |
 | **Web UI Access** | `https://<HOST-IP>:47990` |
-
