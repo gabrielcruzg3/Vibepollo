@@ -227,12 +227,11 @@ install(FILES ${SUNSHINE_VIRTUAL_DISPLAY_VULKAN_LAYER_FILES}
         DESTINATION "${SUNSHINE_VDD_VULKAN_LAYER_DESTINATION}"
         COMPONENT virtual_display_driver)
 
-# Drivers (Vibeshine VHF virtual gamepad)
+# Drivers (Vibepollo VHF virtual gamepad)
 #
 # This is intentionally independent from the display-driver refresh flow. The
-# gamepad package is a signed, immutable libvirtualgamepad release that includes
-# a UMDF DLL, its catalog, and an embedded-signed root-device setup tool. Until
-# the first production release is published, the payload remains opt-in.
+# gamepad package is an immutable libvirtualgamepad producer release. It arrives
+# unsigned; the MSI SignPath request signs only its catalog and setup tool.
 set(SUNSHINE_VIRTUAL_GAMEPAD_ROOT_CLEANUP_SCRIPT
     "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/drivers/vhf-gamepad/cleanup.ps1")
 if(NOT EXISTS "${SUNSHINE_VIRTUAL_GAMEPAD_ROOT_CLEANUP_SCRIPT}")
@@ -268,26 +267,47 @@ if(SUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER)
         # the MSI signing request, so there is no upstream signer to pin.
         foreach(_vhf_gamepad_pin IN ITEMS
                 SUNSHINE_VHF_GAMEPAD_RELEASE_TAG
-                SUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256)
+                SUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256
+                SUNSHINE_VHF_GAMEPAD_SOURCE_REVISION
+                SUNSHINE_VHF_GAMEPAD_DRIVER_VER
+                SUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION)
             if("${${_vhf_gamepad_pin}}" STREQUAL "")
                 message(FATAL_ERROR
                     "SUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER requires ${_vhf_gamepad_pin} for a production package.")
             endif()
         endforeach()
         unset(_vhf_gamepad_pin)
-        if(NOT SUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256 MATCHES "^[0-9a-fA-F]{64}$")
+        sunshine_vhf_is_fixed_length_hex(
+            _vhf_gamepad_pin_valid
+            "${SUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256}"
+            64)
+        if(NOT _vhf_gamepad_pin_valid)
             message(FATAL_ERROR "SUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256 must be a SHA-256 value.")
         endif()
+        sunshine_vhf_is_fixed_length_hex(
+            _vhf_gamepad_pin_valid
+            "${SUNSHINE_VHF_GAMEPAD_SOURCE_REVISION}"
+            40)
+        if(NOT _vhf_gamepad_pin_valid)
+            message(FATAL_ERROR "SUNSHINE_VHF_GAMEPAD_SOURCE_REVISION must be a full commit SHA.")
+        endif()
+        unset(_vhf_gamepad_pin_valid)
         # Still validated when supplied, for the hand-signed package case.
         foreach(_vhf_gamepad_signer IN ITEMS
                 SUNSHINE_VHF_GAMEPAD_CATALOG_SIGNER_THUMBPRINT
                 SUNSHINE_VHF_GAMEPAD_DEVICE_SETUP_SIGNER_THUMBPRINT)
-            if(NOT "${${_vhf_gamepad_signer}}" STREQUAL "" AND
-               NOT "${${_vhf_gamepad_signer}}" MATCHES "^[0-9a-fA-F]{40}$")
-                message(FATAL_ERROR
-                    "${_vhf_gamepad_signer} must be a 40-character SHA-1 thumbprint when set.")
+            if(NOT "${${_vhf_gamepad_signer}}" STREQUAL "")
+                sunshine_vhf_is_fixed_length_hex(
+                    _vhf_gamepad_signer_valid
+                    "${${_vhf_gamepad_signer}}"
+                    40)
+                if(NOT _vhf_gamepad_signer_valid)
+                    message(FATAL_ERROR
+                        "${_vhf_gamepad_signer} must be a 40-character SHA-1 thumbprint when set.")
+                endif()
             endif()
         endforeach()
+        unset(_vhf_gamepad_signer_valid)
         unset(_vhf_gamepad_signer)
     endif()
 
@@ -341,7 +361,10 @@ if(SUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER)
     if(NOT SUNSHINE_ALLOW_LOCAL_VHF_GAMEPAD_TEST_PACKAGE)
         list(APPEND SUNSHINE_VIRTUAL_GAMEPAD_DRIVER_PIN_ARGS
             -ReleaseTag "${SUNSHINE_VHF_GAMEPAD_RELEASE_TAG}"
-            -ExpectedReleaseAssetSha256 "${SUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256}")
+            -ExpectedReleaseAssetSha256 "${SUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256}"
+            -ExpectedSourceRevision "${SUNSHINE_VHF_GAMEPAD_SOURCE_REVISION}"
+            -ExpectedDriverVer "${SUNSHINE_VHF_GAMEPAD_DRIVER_VER}"
+            -ExpectedProtocolVersion "${SUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION}")
         # Passed through only when a pre-signed package is being used.
         if(NOT "${SUNSHINE_VHF_GAMEPAD_CATALOG_SIGNER_THUMBPRINT}" STREQUAL "")
             list(APPEND SUNSHINE_VIRTUAL_GAMEPAD_DRIVER_PIN_ARGS
@@ -364,9 +387,12 @@ if(SUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER)
                     -Repository "${SUNSHINE_VHF_GAMEPAD_REPOSITORY}"
                     -Tag "${SUNSHINE_VHF_GAMEPAD_RELEASE_TAG}"
                     -ExpectedArchiveSha256 "${SUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256}"
+                    -ExpectedSourceRevision "${SUNSHINE_VHF_GAMEPAD_SOURCE_REVISION}"
+                    -ExpectedDriverVer "${SUNSHINE_VHF_GAMEPAD_DRIVER_VER}"
+                    -ExpectedProtocolVersion "${SUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION}"
                     -OutDir "${SUNSHINE_EFFECTIVE_LIBVIRTUALGAMEPAD_PREBUILT_DIR}"
             DEPENDS "${SUNSHINE_VIRTUAL_GAMEPAD_DRIVER_DOWNLOAD_SCRIPT}"
-            COMMENT "Downloading pinned Vibeshine VHF gamepad release"
+            COMMENT "Downloading pinned VHF gamepad producer release"
             VERBATIM)
     endif()
 
@@ -380,7 +406,7 @@ if(SUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER)
         DEPENDS "${SUNSHINE_VIRTUAL_GAMEPAD_DRIVER_REFRESH_SCRIPT}"
                 "${SUNSHINE_VIRTUAL_GAMEPAD_DRIVER_SOURCE_DIR}/install.ps1"
                 "${SUNSHINE_VIRTUAL_GAMEPAD_ROOT_CLEANUP_SCRIPT}"
-        COMMENT "Refreshing Vibeshine VHF gamepad package assets from the pinned release"
+        COMMENT "Refreshing VHF gamepad package assets from the pinned producer release"
         VERBATIM)
 
     add_custom_target(validate_sunshine_virtual_gamepad_driver_assets
@@ -394,7 +420,7 @@ if(SUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER)
         DEPENDS "${SUNSHINE_VIRTUAL_GAMEPAD_DRIVER_REFRESH_SCRIPT}"
                 "${SUNSHINE_VIRTUAL_GAMEPAD_DRIVER_SOURCE_DIR}/install.ps1"
                 "${SUNSHINE_VIRTUAL_GAMEPAD_ROOT_CLEANUP_SCRIPT}"
-        COMMENT "Validating Vibeshine VHF gamepad package assets"
+        COMMENT "Validating consumer VHF gamepad package assets"
         VERBATIM)
 
     if(SUNSHINE_DOWNLOAD_LIBVIRTUALGAMEPAD_RELEASE)
@@ -516,7 +542,7 @@ set(CPACK_COMPONENT_VIRTUAL_DISPLAY_DRIVER_GROUP "Drivers")
 set(CPACK_COMPONENT_VIRTUAL_DISPLAY_DRIVER_REQUIRED true)
 
 if(SUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER)
-    set(CPACK_COMPONENT_VIRTUAL_GAMEPAD_DRIVER_DISPLAY_NAME "Vibeshine Virtual Gamepad Driver")
+    set(CPACK_COMPONENT_VIRTUAL_GAMEPAD_DRIVER_DISPLAY_NAME "Vibepollo Virtual Gamepad Driver")
     set(CPACK_COMPONENT_VIRTUAL_GAMEPAD_DRIVER_DESCRIPTION
         "Pinned VHF UMDF gamepad source-driver package.")
     set(CPACK_COMPONENT_VIRTUAL_GAMEPAD_DRIVER_GROUP "Drivers")
