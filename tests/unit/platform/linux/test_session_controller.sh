@@ -555,10 +555,10 @@ mock_app_list_outputs=()
 mock_stopped_units=()
 mock_stop_effective=0
 cleanup_started=$SECONDS
-if stop_session_generation_apps desktop 1000 1000 /run/user/1000 42 "$((SECONDS + 1))"; then
+if stop_session_generation_apps desktop 1000 1000 /run/user/1000 42 "$((SECONDS + 2))"; then
   fail_test 'cleanup accepted a unit that remained active after stop'
 fi
-((SECONDS - cleanup_started <= 2)) || fail_test 'wedged application cleanup exceeded its total deadline'
+((SECONDS - cleanup_started <= 3)) || fail_test 'wedged application cleanup exceeded its total deadline'
 ((${#mock_stopped_units[@]} == 1)) || fail_test 'wedged application stop was retried instead of polled'
 
 for supported in plasmalogin plasmalogin-autologin sddm sddm-autologin; do

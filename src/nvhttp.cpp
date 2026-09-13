@@ -1755,16 +1755,6 @@ namespace nvhttp {
 
 #ifndef _WIN32
   namespace {
-    bool has_stream_session_activity() {
-      return rtsp_stream::has_pending_launch_or_startup() ||
-             rtsp_stream::session_count_no_cleanup() > 0 ||
-             stream::session::running_sessions.load(std::memory_order_acquire) != 0 ||
-             stream::session::teardown_sessions.load(std::memory_order_acquire) != 0 ||
-             webrtc_stream::has_active_or_pending_sessions() ||
-             webrtc_stream::has_capture_active() ||
-             webrtc_stream::has_teardown_in_progress();
-    }
-
     http_encoder_capabilities_t advertised_encoder_capabilities_for_http() {
       const auto publish = [](video::advertised_encoder_capabilities_t caps, const std::string_view reason) {
         const bool probe_complete = video::has_successful_encoder_probe();

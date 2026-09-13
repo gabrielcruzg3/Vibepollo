@@ -39,27 +39,30 @@ namespace platf::linux_security {
       return fail(errno, "allocating the capability sets");
     }
 
-#ifdef SUNSHINE_BUILD_STEAMOS
-    // SteamOS' user manager passes CAP_WAKE_ALARM in the inheritable set.
-    // The user bundle needs no capabilities, and must retain ordinary Steam
-    // and pressure-vessel launch behavior. Require empty P/E sets, then drop
-    // inherited bits without imposing no_new_privs on child applications.
+    // User sessions (such as systemd or SteamOS) may pass inheritable capabilities
+    // (e.g. CAP_WAKE_ALARM). If permitted and effective sets are empty, this is an
+    // unprivileged launch. Drop inherited bits without imposing no_new_privs on
+    // child applications.
     if (cap_clear_flag(original, CAP_INHERITABLE) != 0) {
-      return fail(errno, "checking the unprivileged SteamOS entry context");
+      return fail(errno, "checking the unprivileged entry context");
     }
     const int unprivileged_comparison = cap_compare(original, sanitized);
     if (unprivileged_comparison != 0) {
-      return fail(unprivileged_comparison < 0 ? errno : EPERM, "requiring an unprivileged SteamOS launch");
+      cap_free(original);
+      original = cap_get_proc();
+      if (!original) {
+        return fail(errno, "reading back the capability set");
+      }
+    } else {
+      if (cap_set_proc(sanitized) != 0) {
+        return fail(errno, "clearing inherited capabilities");
+      }
+      cap_free(original);
+      original = cap_get_proc();
+      if (!original) {
+        return fail(errno, "reading back the sanitized capability set");
+      }
     }
-    if (cap_set_proc(sanitized) != 0) {
-      return fail(errno, "clearing inherited SteamOS capabilities");
-    }
-    cap_free(original);
-    original = cap_get_proc();
-    if (!original) {
-      return fail(errno, "reading back the SteamOS capability set");
-    }
-#endif
 
     const int initial_comparison = cap_compare(original, sanitized);
     if (initial_comparison < 0) {

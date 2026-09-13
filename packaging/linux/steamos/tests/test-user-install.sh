@@ -29,7 +29,8 @@ install -d \
   "$test_root/payload/bin" \
   "$test_root/payload/share/vibepollo/web/v2" \
   "$test_root/runtime"
-install -m 0755 /usr/bin/env "$test_root/payload/bin/vibepollo"
+env_bin=$(command -v gnuenv 2>/dev/null || command -v env)
+install -m 0755 "$env_bin" "$test_root/payload/bin/vibepollo"
 touch "$test_root/payload/share/vibepollo/apps.json" \
   "$test_root/payload/share/vibepollo/web/index.html" \
   "$test_root/payload/share/vibepollo/web/v2/index.html"

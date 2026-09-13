@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[4]
 SPEC = importlib.util.spec_from_file_location('local_deploy', ROOT / 'scripts/linux_local_deploy.py')
 deploy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(deploy)
+os.umask(0o022)
 VERSION = '1.19.0-beta.5'
 
 

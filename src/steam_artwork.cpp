@@ -27,13 +27,22 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
-#ifdef VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS
+#if defined(VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS) || defined(VIBESHINE_STEAM_ARTWORK_HAS_PNG)
 extern "C" {
+#if defined(VIBESHINE_STEAM_ARTWORK_HAS_JPEG) || defined(VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS)
 #include <jpeglib.h>
+#endif
+#if defined(VIBESHINE_STEAM_ARTWORK_HAS_PNG) || defined(VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS)
 #include <png.h>
+#endif
+#if defined(VIBESHINE_STEAM_ARTWORK_HAS_WEBP) || defined(VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS)
 #include <webp/decode.h>
+#endif
 }
 #include <setjmp.h>
+#if defined(__linux__) && !defined(VIBESHINE_STEAM_ARTWORK_HAS_WEBP) && !defined(VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS)
+#include <dlfcn.h>
+#endif
 #endif
 
 #ifdef _WIN32
@@ -287,13 +296,14 @@ namespace {
     return AV_CODEC_ID_NONE;
   }
 
-#ifdef VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS
+#if defined(VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS) || defined(VIBESHINE_STEAM_ARTWORK_HAS_PNG)
   struct rgba_image_t {
     int width = 0;
     int height = 0;
     std::vector<std::uint8_t> pixels;
   };
 
+#if defined(VIBESHINE_STEAM_ARTWORK_HAS_JPEG) || defined(VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS)
   struct jpeg_error_t {
     jpeg_error_mgr base;
     jmp_buf jump;
@@ -338,8 +348,10 @@ namespace {
     jpeg_destroy_decompress(&decoder);
     return image;
   }
+#endif
 
   std::optional<rgba_image_t> decode_webp(const std::vector<std::uint8_t> &bytes) {
+#if defined(VIBESHINE_STEAM_ARTWORK_HAS_WEBP) || defined(VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS)
     int width = 0;
     int height = 0;
     auto *decoded = WebPDecodeRGBA(bytes.data(), bytes.size(), &width, &height);
@@ -350,8 +362,37 @@ namespace {
     rgba_image_t image {width, height, std::vector<std::uint8_t>(decoded, decoded + width * height * 4)};
     WebPFree(decoded);
     return image;
+#elif defined(__linux__)
+    static void *handle = nullptr;
+    static auto get_handle = []() -> void * {
+      for (const char *name : {"libwebp.so.7", "libwebp.so.6", "libwebp.so"}) {
+        if (void *h = dlopen(name, RTLD_LAZY)) return h;
+      }
+      return nullptr;
+    };
+    if (!handle) handle = get_handle();
+    if (!handle) return std::nullopt;
+    using pfn_WebPDecodeRGBA = uint8_t *(*)(const uint8_t *, size_t, int *, int *);
+    using pfn_WebPFree = void (*)(void *);
+    auto p_decode = reinterpret_cast<pfn_WebPDecodeRGBA>(dlsym(handle, "WebPDecodeRGBA"));
+    auto p_free = reinterpret_cast<pfn_WebPFree>(dlsym(handle, "WebPFree"));
+    if (!p_decode || !p_free) return std::nullopt;
+    int width = 0;
+    int height = 0;
+    auto *decoded = p_decode(bytes.data(), bytes.size(), &width, &height);
+    if (!decoded || width <= 0 || height <= 0) {
+      if (decoded) p_free(decoded);
+      return std::nullopt;
+    }
+    rgba_image_t image {width, height, std::vector<std::uint8_t>(decoded, decoded + width * height * 4)};
+    p_free(decoded);
+    return image;
+#else
+    return std::nullopt;
+#endif
   }
 
+#if defined(VIBESHINE_STEAM_ARTWORK_HAS_PNG) || defined(VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS)
   std::optional<std::vector<std::uint8_t>> encode_png(const rgba_image_t &image) {
     png_structp writer = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
     png_infop info = writer ? png_create_info_struct(writer) : nullptr;
@@ -379,6 +420,7 @@ namespace {
     png_destroy_write_struct(&writer, &info);
     return output;
   }
+#endif
 
   std::optional<std::vector<std::uint8_t>> convert_with_image_libs(const fs::path &source,
                                                                      const std::vector<std::uint8_t> &bytes) {
@@ -386,19 +428,28 @@ namespace {
     if (id == AV_CODEC_ID_PNG && bytes.size() >= sizeof(png_signature) &&
         std::equal(std::begin(png_signature), std::end(png_signature), bytes.begin())) return bytes;
     std::optional<rgba_image_t> image;
+#if defined(VIBESHINE_STEAM_ARTWORK_HAS_JPEG) || defined(VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS)
     if (id == AV_CODEC_ID_MJPEG) image = decode_jpeg(bytes);
-    else if (id == AV_CODEC_ID_WEBP) image = decode_webp(bytes);
+#endif
+    if (id == AV_CODEC_ID_WEBP) image = decode_webp(bytes);
+#if defined(VIBESHINE_STEAM_ARTWORK_HAS_PNG) || defined(VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS)
     return image ? encode_png(*image) : std::nullopt;
+#else
+    return std::nullopt;
+#endif
   }
 #endif
 
   std::optional<std::vector<std::uint8_t>> convert_to_png(const fs::path &source) {
     const auto bytes = read_bytes(source);
     if (bytes.empty()) return std::nullopt;
-#ifdef VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS
+    const auto id = codec_id_for(source, bytes);
+    if (id == AV_CODEC_ID_PNG && valid_png_bytes(bytes)) {
+      return bytes;
+    }
+#if defined(VIBESHINE_STEAM_ARTWORK_IMAGE_LIBS) || defined(VIBESHINE_STEAM_ARTWORK_HAS_PNG)
     if (const auto converted = convert_with_image_libs(source, bytes)) return converted;
 #endif
-    const auto id = codec_id_for(source, bytes);
     if (id == AV_CODEC_ID_NONE) return std::nullopt;
     const auto *decoder = avcodec_find_decoder(id);
     if (!decoder) return std::nullopt;

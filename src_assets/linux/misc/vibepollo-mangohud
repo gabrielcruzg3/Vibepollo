@@ -54,7 +54,7 @@ while IFS='=' read -r key value; do
 done < "$state_file"
 
 case "$limit" in
-  ''|.*|*[^0-9.]*|*.*.*) exec "$@" ;;
+  ''|.*|*[!0-9.]*|*.*.*) exec "$@" ;;
 esac
 case "$expires" in
   ''|*[!0-9]*) exec "$@" ;;

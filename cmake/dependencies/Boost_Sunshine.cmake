@@ -47,7 +47,28 @@ endif()
 if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.30")
     cmake_policy(SET CMP0167 NEW)  # Get BoostConfig.cmake from upstream
 endif()
-find_package(Boost CONFIG ${BOOST_VERSION} COMPONENTS ${BOOST_COMPONENTS})
+
+set(_BOOST_COMPILED_COMPONENTS
+        filesystem
+        log
+        log_setup
+        process
+        program_options
+)
+if(NOT WIN32)
+    list(APPEND _BOOST_COMPILED_COMPONENTS locale)
+endif()
+
+find_package(Boost ${BOOST_VERSION} CONFIG COMPONENTS ${_BOOST_COMPILED_COMPONENTS})
+if(TARGET Boost::headers)
+    foreach(_comp IN ITEMS system algorithm asio crc format function property_tree preprocessor scope uuid)
+        if(NOT TARGET "Boost::${_comp}")
+            add_library("Boost::${_comp}" INTERFACE IMPORTED)
+            target_link_libraries("Boost::${_comp}" INTERFACE Boost::headers)
+        endif()
+    endforeach()
+endif()
+
 set(_boost_targets_missing FALSE)
 foreach(component IN LISTS BOOST_COMPONENTS)
     if(NOT TARGET "Boost::${component}")

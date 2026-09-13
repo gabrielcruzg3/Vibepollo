@@ -200,16 +200,26 @@ if(NOT TARGET Boost::algorithm OR
    NOT TARGET Boost::log_setup OR
    NOT TARGET Boost::property_tree OR
    NOT TARGET Boost::system)
-    find_package(Boost CONFIG REQUIRED COMPONENTS
-        algorithm
-        asio
-        crc
-        format
-        function
-        log
-        log_setup
-        property_tree
-        system)
+    find_package(Boost CONFIG COMPONENTS log log_setup)
+    if(TARGET Boost::headers)
+        foreach(_comp IN ITEMS system algorithm asio crc format function property_tree)
+            if(NOT TARGET "Boost::${_comp}")
+                add_library("Boost::${_comp}" INTERFACE IMPORTED)
+                target_link_libraries("Boost::${_comp}" INTERFACE Boost::headers)
+            endif()
+        endforeach()
+    else()
+        find_package(Boost CONFIG REQUIRED COMPONENTS
+            algorithm
+            asio
+            crc
+            format
+            function
+            log
+            log_setup
+            property_tree
+            system)
+    endif()
 endif()
 set(SUNSHINE_TEST_SOCKET_LIBRARIES "")
 if(WIN32)

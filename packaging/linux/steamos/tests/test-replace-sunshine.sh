@@ -13,7 +13,7 @@ trap 'rm -rf -- "$test_root"' EXIT
 mkdir -p "$test_root/fakebin" "$test_root/payload/bin" "$test_root/payload/share/vibepollo/web/v2"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
   -subj /CN=MigrationFixture -keyout "$test_root/client.key" -out "$test_root/client.pem" 2>/dev/null
-cp /usr/bin/env "$test_root/payload/bin/vibepollo"
+cp "$(command -v gnuenv 2>/dev/null || command -v env)" "$test_root/payload/bin/vibepollo"
 touch "$test_root/payload/share/vibepollo/"{apps.json,web/index.html,web/v2/index.html}
 cat > "$test_root/fakebin/systemctl" <<'EOF'
 #!/usr/bin/env bash

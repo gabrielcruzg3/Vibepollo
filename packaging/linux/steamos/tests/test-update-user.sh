@@ -8,7 +8,7 @@ bash -n "$script"
 root=$(mktemp -d /tmp/vibepollo-update-tests.XXXXXXXX)
 trap 'rm -rf -- "$root"' EXIT
 mkdir -p "$root/fakebin" "$root/payload/bin" "$root/payload/share/vibepollo/web/v2"
-cp /usr/bin/env "$root/payload/bin/vibepollo"
+cp "$(command -v gnuenv 2>/dev/null || command -v env)" "$root/payload/bin/vibepollo"
 touch "$root/payload/share/vibepollo/"{apps.json,web/index.html,web/v2/index.html}
 cat > "$root/fakebin/systemctl" <<'EOF'
 #!/usr/bin/env bash
