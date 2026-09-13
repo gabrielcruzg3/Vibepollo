@@ -47,13 +47,7 @@ namespace platf::linux_security {
       return fail(errno, "checking the unprivileged entry context");
     }
     const int unprivileged_comparison = cap_compare(original, sanitized);
-    if (unprivileged_comparison != 0) {
-      cap_free(original);
-      original = cap_get_proc();
-      if (!original) {
-        return fail(errno, "reading back the capability set");
-      }
-    } else {
+    if (unprivileged_comparison == 0) {
       if (cap_set_proc(sanitized) != 0) {
         return fail(errno, "clearing inherited capabilities");
       }

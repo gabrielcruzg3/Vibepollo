@@ -57,7 +57,8 @@ Our fork followed upstream release tags step-by-step using the naming convention
 | [tests/integration/test_locale_consistency.cpp](file:///home/g3/Vibepollo/tests/integration/test_locale_consistency.cpp#L23-L30) | Test failed when run from `build/` via CTest due to relative paths to `src/config.cpp` and locale assets. | Added `find_repository_root()` parent-traversal helper. |
 | [cmake/dependencies/Boost_Sunshine.cmake](file:///home/g3/Vibepollo/cmake/dependencies/Boost_Sunshine.cmake) & [tests/CMakeLists.txt](file:///home/g3/Vibepollo/tests/CMakeLists.txt) | System Boost 1.90.0 on Ubuntu failed `find_package(Boost CONFIG 1.89.0 ...)` with header-only components, causing duplicate alias targets | Query only compiled Boost components and alias header-only targets from `Boost::headers`. |
 | [src_assets/linux/misc/vibepollo-mangohud](file:///home/g3/Vibepollo/src_assets/linux/misc/vibepollo-mangohud#L57) | Dash `/bin/sh` does not support `[^...]` character set negation | Changed `*[^0-9.]*` to POSIX `*[!0-9.]*`. |
-| [src/platform/linux/capability_sanitizer.h](file:///home/g3/Vibepollo/src/platform/linux/capability_sanitizer.h) | Systemd user sessions pass `CAP_WAKE_ALARM` in inheritable set (`CapInh`), causing unprivileged check failure | Generalized unprivileged capability check to inspect empty P/E sets and drop inherited bits on any Linux desktop/session. |
+| [src/platform/linux/capability_sanitizer.h](file:///home/g3/Vibepollo/src/platform/linux/capability_sanitizer.h) | Systemd user sessions pass `CAP_WAKE_ALARM` in inheritable set (`CapInh`), causing unprivileged check failure and privileged entry exact-comparison failure (`EPERM`) | Clear inherited capabilities on Linux before checking context so unprivileged launches proceed without `no_new_privs` and privileged hosts retain exact permitted `{CAP_SYS_ADMIN, CAP_SYS_NICE}` sets. |
+| [cmake/packaging/linux.cmake](file:///home/g3/Vibepollo/cmake/packaging/linux.cmake) | Debian packages lacked runtime `libwebp` dependency for dynamic artwork conversion | Added `libwebp7 | libwebp6 | libwebp` to `CPACK_DEBIAN_PACKAGE_DEPENDS`. |
 | [src/steam_artwork.cpp](file:///home/g3/Vibepollo/src/steam_artwork.cpp) & [cmake/compile_definitions/common.cmake](file:///home/g3/Vibepollo/cmake/compile_definitions/common.cmake) | Bundled FFmpeg lacks PNG/WebP/JPEG codecs; system missing `libwebp-dev`/`libjpeg-dev` | Pass through valid PNG directly; dynamically resolve WebP decoder from runtime `libwebp.so.7` via `dlopen`; link system `libpng` for encoding. |
 | [tests/unit/platform/linux/test_local_deploy.py](file:///home/g3/Vibepollo/tests/unit/platform/linux/test_local_deploy.py) & [test_linux_installer.sh](file:///home/g3/Vibepollo/tests/unit/platform/linux/test_linux_installer.sh) | User session umask `0002` created group-writable fixture directories failing security audits | Enforced standard `022` umask in test environments. |
 | [packaging/linux/steamos/tests/test-*.sh](file:///home/g3/Vibepollo/packaging/linux/steamos/tests/) | Payload dummy `/usr/bin/env` failed under multicall cargo uutils coreutils | Prefer standalone `gnuenv` binary when available or fallback to `env`. |
@@ -74,7 +75,6 @@ From `/home/g3/Vibepollo`:
 export PATH="/usr/local/cuda-13.1/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 export CC=gcc-14
 export CXX=g++-14
-export BUILD_VERSION=1.19.0-beta.3-agy
 
 cmake -B build -G Ninja -S . \
   -DBUILD_TESTS=ON \
@@ -104,36 +104,25 @@ ninja -C build -j2
 ### Step 3: Run Full Test Suite (100% Passing)
 ```bash
 ctest --test-dir build --output-on-failure
-# 100% tests passed, 0 tests failed out of 36
+# 100% tests passed, 0 tests failed out of 121
 ```
 
 ### Step 4: Generate `.deb` Packages
 ```bash
-mkdir -p build/cpack_artifacts
-
-# Generate standalone (all-in-one) package
-cmake -B build -DCPACK_DEB_COMPONENT_INSTALL=OFF
+# Generate monolithic Debian package
 cpack -G DEB --config build/CPackConfig.cmake
-mv build/cpack_artifacts/Vibepollo.deb build/cpack_artifacts/Vibepollo-standalone-1.19.0-beta.3-agy.deb
-
-# Generate split packages (core & web assets separately)
-cmake -B build -DCPACK_DEB_COMPONENT_INSTALL=ON
-cpack -G DEB --config build/CPackConfig.cmake
-mv build/cpack_artifacts/Vibepollo-Unspecified.deb build/cpack_artifacts/Vibepollo-core-1.19.0-beta.3-agy.deb
-mv build/cpack_artifacts/Vibepollo-assets.deb build/cpack_artifacts/Vibepollo-web-1.19.0-beta.3-agy.deb
+cp build/cpack_artifacts/Vibepollo.deb build/cpack_artifacts/vibepollo-2.0.0-beta.2-linux-amd64.deb
 ```
 
 ---
 
-## 5. Release Packages (`1.19.0-beta.3-agy`)
+## 5. Release Packages (`2.0.0-beta.2-agy`)
 
-Located in `build/cpack_artifacts/` and published on [GitHub Releases](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-beta.3-agy):
+Located in `build/cpack_artifacts/` and published on [GitHub Releases](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/2.0.0-beta.2-agy):
 
 | Artifact Name | Size | Contents |
 |---|---|---|
-| **`Vibepollo-standalone-1.19.0-beta.3-agy.deb`** | `19.8 MB` | Complete standalone installer containing core binary (`sunshine-1.19.0-beta.3-agy`), Web UI assets, systemd units, icons, and shaders. |
-| **`Vibepollo-core-1.19.0-beta.3-agy.deb`** | `14.8 MB` | Backend executable and system integration only (no Web UI assets). |
-| **`Vibepollo-web-1.19.0-beta.3-agy.deb`** | `5.0 MB` | Frontend Web UI assets only (`/usr/share/sunshine/web/`). |
+| **`vibepollo-2.0.0-beta.2-linux-amd64.deb`** | `46.9 MB` | Complete standalone monolithic installer containing core binary (`vibepollo-2.0.0-beta.2-agy`), Web UI assets (`web/` and `web/v2`), systemd units, icons, shaders, and runtime dependencies. |
 
 ---
 

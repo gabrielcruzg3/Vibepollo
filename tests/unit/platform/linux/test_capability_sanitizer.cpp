@@ -61,6 +61,16 @@ int main() {
                 static_cast<unsigned long>(capability), 0, 0) == 0);
   }
 
+  // Simulated privileged entry with inheritable capability (e.g. systemd user session):
+  cap_t priv_entry = cap_from_text("cap_sys_admin,cap_sys_nice=p cap_wake_alarm=i");
+  CHECK(priv_entry != nullptr);
+  CHECK(cap_clear_flag(priv_entry, CAP_INHERITABLE) == 0);
+  cap_t expected_sanitized = cap_from_text("cap_sys_admin,cap_sys_nice=p");
+  CHECK(expected_sanitized != nullptr);
+  CHECK(cap_compare(priv_entry, expected_sanitized) == 0);
+  cap_free(expected_sanitized);
+  cap_free(priv_entry);
+
   std::puts("PASS: Linux startup capability sanitization");
   return 0;
 }
