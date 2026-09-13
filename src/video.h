@@ -304,6 +304,10 @@ namespace video {
   extern encoder_t nvenc;  // available for windows and linux
 #endif
 
+#if defined(__linux__)
+  extern encoder_t nvenc_legacy;
+#endif
+
 #ifdef _WIN32
   extern encoder_t amdvce_experimental;
   extern encoder_t amdvce_ffmpeg;

@@ -3,6 +3,7 @@
 #include "src/remote_session.h"
 
 #include <atomic>
+#include <algorithm>
 #include <thread>
 
 namespace {
@@ -16,11 +17,23 @@ TEST(RemoteSession, SyntheticIdsAndLegacyIdsNeverFallThrough) {
   EXPECT_EQ(remote_session::identify(remote_session::monitor_id), remote_session::control_e::monitor);
   EXPECT_EQ(remote_session::identify(2147483605), remote_session::control_e::monitor);
   EXPECT_EQ(remote_session::identify(11, "9a1c5a25-58fe-40e0-b9aa-7d3f00000006"), remote_session::control_e::input);
+  EXPECT_EQ(remote_session::identify(remote_session::running_game_id), remote_session::control_e::running_game);
+  const auto running_id = remote_session::synthetic_running_game_id(42);
+  EXPECT_NE(running_id, 42);
+  EXPECT_EQ(remote_session::identify(running_id), remote_session::control_e::none);
+  EXPECT_EQ(remote_session::identify(running_id, {}, 42), remote_session::control_e::running_game);
+  EXPECT_EQ(remote_session::identify(running_id, {}, 43), remote_session::control_e::none);
   EXPECT_EQ(remote_session::identify(11), remote_session::control_e::none);
   EXPECT_TRUE(remote_session::reserved_name("remote monitor"));
+  EXPECT_TRUE(remote_session::reserved_name("    Remote Monitor"));
   EXPECT_TRUE(remote_session::reserved_name("Remote Input"));
   EXPECT_TRUE(remote_session::reserved_name("Virtual Display"));
+  EXPECT_TRUE(remote_session::reserved_name("   Remote Input"));
   EXPECT_TRUE(remote_session::reserved_name("Terminate"));
+  EXPECT_EQ(remote_session::synthetic(remote_session::control_e::monitor).title, "Remote Monitor");
+  EXPECT_EQ(remote_session::synthetic(remote_session::control_e::input).title, "Remote Input");
+  EXPECT_EQ(remote_session::synthetic(remote_session::control_e::resume).title, "Resume");
+  EXPECT_EQ(remote_session::synthetic(remote_session::control_e::terminate).title, "Terminate");
   ASSERT_TRUE(remote_session::synthetic_artwork_filename(remote_session::control_e::monitor));
   EXPECT_EQ(*remote_session::synthetic_artwork_filename(remote_session::control_e::monitor), "remote-monitor.png");
   ASSERT_TRUE(remote_session::synthetic_artwork_filename(remote_session::control_e::disconnect_monitor));
@@ -32,63 +45,233 @@ TEST(RemoteSession, SyntheticIdsAndLegacyIdsNeverFallThrough) {
 
 TEST(RemoteSession, CatalogueProjectionMatchesCallerOwnershipMatrix) {
   const std::vector<remote_session::app_t> configured {{1, "one", "One", false}, {2, "two", "Two", false}};
-  const auto idle = remote_session::project(caller("other"), {}, {}, configured);
+  const auto idle = remote_session::project(caller("other"), {}, {}, configured, false);
   ASSERT_TRUE(idle.free);
   ASSERT_EQ(idle.catalogue.size(), 4);
   EXPECT_EQ(idle.catalogue[2].id, remote_session::input_id);
   EXPECT_EQ(idle.catalogue[3].id, remote_session::monitor_id);
 
-  const auto owner = remote_session::project(caller("owner"), game(), {}, configured);
+  const auto owner = remote_session::project(caller("owner"), game(), {}, configured, false);
   EXPECT_FALSE(owner.free);
   EXPECT_EQ(owner.current_game, 42);
   ASSERT_EQ(owner.catalogue.size(), 4);
   EXPECT_EQ(owner.catalogue[0].title, "One");
 
-  const auto observer = remote_session::project(caller("other"), game(), {}, configured);
-  ASSERT_EQ(observer.catalogue.size(), 5);
-  EXPECT_EQ(observer.catalogue[0].id, remote_session::resume_id);
-  EXPECT_EQ(observer.catalogue[1].id, remote_session::terminate_id);
-  EXPECT_EQ(observer.catalogue[1].title, "Terminate");
-  EXPECT_EQ(observer.catalogue[2].id, 42);
-  EXPECT_EQ(observer.catalogue[3].id, remote_session::input_id);
-  EXPECT_EQ(observer.catalogue[4].id, remote_session::monitor_id);
+  const auto normal_observer = remote_session::project(caller("other"), game(), {}, configured, false);
+  EXPECT_TRUE(normal_observer.free);
+  EXPECT_EQ(normal_observer.current_game, 0);
+  ASSERT_EQ(normal_observer.catalogue.size(), 7);
+  EXPECT_EQ(normal_observer.catalogue[0].id, remote_session::synthetic_running_game_id(42));
+  EXPECT_EQ(normal_observer.catalogue[1].id, remote_session::secondary_resume_id);
+  EXPECT_EQ(normal_observer.catalogue[2].id, remote_session::secondary_terminate_id);
+  EXPECT_EQ(normal_observer.catalogue[3].title, "One");
+  EXPECT_EQ(normal_observer.catalogue[4].title, "Two");
+  EXPECT_EQ(normal_observer.catalogue[5].id, remote_session::secondary_input_id);
+  EXPECT_EQ(normal_observer.catalogue[6].id, remote_session::secondary_monitor_id);
 
-  const auto monitor = remote_session::project(caller("monitor"), {}, {.role = remote_session::role_e::monitor, .retained = true}, configured);
+  const auto observer = remote_session::project(caller("other"), game(), {}, configured, true);
+  ASSERT_EQ(observer.catalogue.size(), 7);
+  EXPECT_EQ(observer.catalogue[0].id, remote_session::synthetic_running_game_id(42));
+  EXPECT_EQ(observer.catalogue[1].id, remote_session::secondary_resume_id);
+  EXPECT_EQ(observer.catalogue[2].id, remote_session::secondary_terminate_id);
+  EXPECT_EQ(observer.catalogue[2].title, " Terminate");
+  EXPECT_EQ(observer.catalogue[3].title, "One");
+  EXPECT_EQ(observer.catalogue[4].title, "Two");
+  EXPECT_EQ(observer.catalogue[5].id, remote_session::secondary_input_id);
+  EXPECT_EQ(observer.catalogue[6].id, remote_session::secondary_monitor_id);
+
+  const auto monitor = remote_session::project(caller("monitor"), {}, {.role = remote_session::role_e::monitor, .retained = true}, configured, true);
   ASSERT_EQ(monitor.catalogue.size(), 2);
   EXPECT_EQ(monitor.catalogue[0].id, remote_session::resume_id);
   EXPECT_EQ(monitor.catalogue[1].id, remote_session::disconnect_monitor_id);
 
-  const auto input = remote_session::project(caller("input"), {}, {.role = remote_session::role_e::input}, configured);
+  const auto input = remote_session::project(caller("input"), {}, {.role = remote_session::role_e::input}, configured, true);
   ASSERT_EQ(input.catalogue.size(), 3);
   EXPECT_EQ(input.catalogue[0].id, 1);
   EXPECT_EQ(input.catalogue[1].id, 2);
   EXPECT_EQ(input.catalogue[2].id, remote_session::monitor_id);
 
-  const auto input_during_game = remote_session::project(caller("input"), game(), {.role = remote_session::role_e::input}, configured);
-  ASSERT_EQ(input_during_game.catalogue.size(), 4);
-  EXPECT_EQ(input_during_game.catalogue[0].id, remote_session::resume_id);
-  EXPECT_EQ(input_during_game.catalogue[1].id, remote_session::terminate_id);
-  EXPECT_EQ(input_during_game.catalogue[2].id, 42);
-  EXPECT_EQ(input_during_game.catalogue[3].id, remote_session::monitor_id);
+  const auto input_during_game = remote_session::project(caller("input"), game(), {.role = remote_session::role_e::input}, configured, true);
+  ASSERT_EQ(input_during_game.catalogue.size(), 6);
+  EXPECT_EQ(input_during_game.catalogue[0].id, remote_session::synthetic_running_game_id(42));
+  EXPECT_EQ(input_during_game.catalogue[1].id, remote_session::secondary_resume_id);
+  EXPECT_EQ(input_during_game.catalogue[2].id, remote_session::secondary_terminate_id);
+  EXPECT_EQ(input_during_game.catalogue[3].title, "One");
+  EXPECT_EQ(input_during_game.catalogue[4].title, "Two");
+  EXPECT_EQ(input_during_game.catalogue[5].id, remote_session::secondary_monitor_id);
 
-  const auto game_owner_monitor = remote_session::project(caller("owner"), game(), {.role = remote_session::role_e::monitor, .retained = true}, configured);
+  const auto game_owner_monitor = remote_session::project(caller("owner"), game(), {.role = remote_session::role_e::monitor, .retained = true}, configured, true);
   ASSERT_EQ(game_owner_monitor.catalogue.size(), 2);
   EXPECT_EQ(game_owner_monitor.catalogue[0].id, remote_session::resume_id);
   EXPECT_EQ(game_owner_monitor.catalogue[1].id, remote_session::disconnect_monitor_id);
 }
 
 TEST(RemoteSession, ConfiguredRemoteMarkersCannotShadowSyntheticControls) {
+  const auto configured_input = remote_session::synthetic(remote_session::control_e::input);
+  const auto configured_monitor = remote_session::synthetic(remote_session::control_e::monitor);
   const std::vector<remote_session::app_t> configured {
     {1, "one", "One", false},
     {2, "shadow-input", "Remote Input", false},
     {3, "shadow-monitor", "remote monitor", false},
     {4, "legacy-virtual-display", "Virtual Display", false},
+    {5, configured_input.uuid, configured_input.title, false},
+    {6, configured_monitor.uuid, configured_monitor.title, false},
   };
-  const auto idle = remote_session::project(caller("client"), {}, {}, configured);
+  const auto idle = remote_session::project(caller("client"), {}, {}, configured, false);
   ASSERT_EQ(idle.catalogue.size(), 3);
   EXPECT_EQ(idle.catalogue[0].title, "One");
   EXPECT_EQ(idle.catalogue[1].id, remote_session::input_id);
   EXPECT_EQ(idle.catalogue[2].id, remote_session::monitor_id);
+}
+
+TEST(RemoteSession, UngatedGameStaysLaunchableAndCancelableUntilSpecialSessionOwnership) {
+  const auto active_game = game();
+  const auto owner = caller("owner");
+  const auto other = caller("other");
+
+  EXPECT_TRUE(remote_session::exposes_active_game(owner, active_game, {}, false));
+  EXPECT_FALSE(remote_session::exposes_active_game(other, active_game, {}, false));
+  EXPECT_TRUE(remote_session::allows_normal_game_cancel(owner, active_game, false));
+  EXPECT_TRUE(remote_session::allows_normal_game_cancel(other, active_game, false));
+
+  EXPECT_TRUE(remote_session::exposes_active_game(owner, active_game, {}, true));
+  EXPECT_FALSE(remote_session::exposes_active_game(other, active_game, {}, true));
+  EXPECT_TRUE(remote_session::exposes_active_game(other, active_game, {}, false, true));
+  EXPECT_TRUE(remote_session::allows_normal_game_cancel(owner, active_game, true));
+  EXPECT_FALSE(remote_session::allows_normal_game_cancel(other, active_game, true));
+
+  const remote_session::owner_t retained_monitor {.role = remote_session::role_e::monitor, .retained = true};
+  EXPECT_FALSE(remote_session::exposes_active_game(owner, active_game, retained_monitor, true));
+  EXPECT_FALSE(remote_session::exposes_active_game(other, {}, {}, false));
+  EXPECT_FALSE(remote_session::allows_normal_game_cancel(caller("other", true, true, false), active_game, false));
+}
+
+TEST(RemoteSession, SecondaryCatalogueKeepsConfiguredRunningAppBesideInvisibleResumeDuplicate) {
+  const auto active_game = game();
+  const std::vector<remote_session::app_t> configured {
+    active_game.app,
+    {7, "other", "Another game", false},
+  };
+
+  const auto projection = remote_session::project(caller("other"), active_game, {}, configured, false);
+  ASSERT_EQ(projection.catalogue.size(), 7);
+  EXPECT_EQ(projection.catalogue[0].id, remote_session::synthetic_running_game_id(active_game.app.id));
+  EXPECT_EQ(projection.catalogue[0].uuid, remote_session::synthetic_uuid(remote_session::control_e::running_game));
+  EXPECT_EQ(projection.catalogue[0].title, "     Running game");
+  EXPECT_EQ(projection.catalogue[1].id, remote_session::secondary_resume_id);
+  EXPECT_EQ(projection.catalogue[3].id, active_game.app.id);
+  EXPECT_EQ(projection.catalogue[3].uuid, active_game.app.uuid);
+  EXPECT_EQ(projection.catalogue[3].title, active_game.app.title);
+  EXPECT_EQ(
+    remote_session::dispatch(caller("other"), active_game, {}, remote_session::identify(projection.catalogue[0].id, projection.catalogue[0].uuid)).resume_role,
+    remote_session::role_e::game
+  );
+}
+
+TEST(RemoteSession, OnlySecondaryCatalogueControlsReceiveAlphabeticalPriority) {
+  const remote_session::app_t first {42, "first", "Zebra", false};
+  const remote_session::app_t second {77, "second", "Alpha", false};
+  const auto first_tile = remote_session::synthetic_running_game(first);
+  const auto repeated_first_tile = remote_session::synthetic_running_game(first);
+  const auto second_tile = remote_session::synthetic_running_game(second);
+
+  EXPECT_EQ(first_tile.id, repeated_first_tile.id);
+  EXPECT_NE(first_tile.id, first.id);
+  EXPECT_NE(first_tile.id, second_tile.id);
+
+  const std::vector<remote_session::app_t> configured {{1, "ordinary", "Another game", false}};
+  auto primary = remote_session::project(caller("first"), {.running = true, .owner_uuid = "first", .app = first}, {}, configured, false).catalogue;
+  std::sort(primary.begin(), primary.end(), [](const auto &left, const auto &right) {
+    return left.title < right.title;
+  });
+  EXPECT_EQ(primary[0].id, 1);
+  EXPECT_EQ(primary[1].id, remote_session::input_id);
+  EXPECT_EQ(primary[2].id, remote_session::monitor_id);
+
+  auto secondary = remote_session::project(caller("other"), {.running = true, .owner_uuid = "first", .app = first}, {}, configured, false).catalogue;
+  std::sort(secondary.begin(), secondary.end(), [](const auto &left, const auto &right) {
+    return left.title < right.title;
+  });
+  EXPECT_EQ(secondary[0].id, first_tile.id);
+  EXPECT_EQ(secondary[1].id, remote_session::secondary_monitor_id);
+  EXPECT_EQ(secondary[2].id, remote_session::secondary_input_id);
+  EXPECT_EQ(secondary[3].id, remote_session::secondary_resume_id);
+  EXPECT_EQ(secondary[4].id, remote_session::secondary_terminate_id);
+  EXPECT_EQ(secondary[5].id, 1);
+}
+
+TEST(RemoteSession, CatalogueTransitionsDoNotDuplicateMoonlightRows) {
+  const std::vector<remote_session::app_t> configured {
+    {1, "alpha", "Alpha", false}, {2, "beta", "Beta", false}, game().app,
+  };
+  const std::vector<remote_session::projection_t> states {
+    remote_session::project(caller("other"), {}, {}, configured, false),
+    remote_session::project(caller("owner"), game(), {}, configured, false),
+    remote_session::project(caller("other"), game(), {}, configured, false),
+    remote_session::project(caller("other"), game(), {}, configured, true),
+    remote_session::project(caller("other"), {}, {.role = remote_session::role_e::input}, configured, true),
+    remote_session::project(caller("other"), game(), {.role = remote_session::role_e::input}, configured, true),
+    remote_session::project(caller("other"), game(), {.role = remote_session::role_e::monitor, .retained = true}, configured, true),
+  };
+  // These ASCII titles have the same order with Moonlight's lowercase sort.
+  const auto sort = [](auto &apps) {
+    std::sort(apps.begin(), apps.end(), [](const auto &a, const auto &b) { return a.title < b.title; });
+  };
+  for (std::size_t from = 0; from < states.size(); ++from) {
+    for (std::size_t to = 0; to < states.size(); ++to) {
+      SCOPED_TRACE(std::to_string(from) + " -> " + std::to_string(to));
+      auto visible = states[from].catalogue;
+      auto next = states[to].catalogue;
+      sort(visible);
+      sort(next);
+      // Reproduce Moonlight Qt AppModel's incremental update contract:
+      // surviving IDs are renamed in place, then additions use sorted search.
+      for (auto it = visible.begin(); it != visible.end();) {
+        const auto found = std::find_if(next.begin(), next.end(), [&](const auto &app) { return app.id == it->id; });
+        if (found == next.end()) {
+          it = visible.erase(it);
+        } else {
+          EXPECT_EQ(it->title, found->title) << "Surviving IDs must not change sort position";
+          *it++ = *found;
+        }
+      }
+      for (const auto &app : next) {
+        const auto pos = std::find_if(visible.begin(), visible.end(), [&](const auto &existing) {
+          return existing.id == app.id || existing.title > app.title;
+        });
+        if (pos == visible.end() || pos->id != app.id) visible.insert(pos, app);
+      }
+      ASSERT_EQ(visible.size(), next.size());
+      for (std::size_t i = 0; i < next.size(); ++i) {
+        EXPECT_EQ(visible[i].id, next[i].id);
+        EXPECT_EQ(visible[i].title, next[i].title);
+      }
+    }
+  }
+}
+
+TEST(RemoteSession, PrioritizedIdentitiesPreserveActionsAndArtwork) {
+  const auto active_game = game();
+  const auto other = caller("other");
+  const auto projection = remote_session::project(other, active_game, {}, {}, true);
+  for (const auto &app : projection.catalogue) {
+    const auto control = remote_session::identify(app.id, {}, active_game.app.id);
+    ASSERT_NE(control, remote_session::control_e::none);
+    EXPECT_EQ(control, remote_session::identify(0, app.uuid));
+    if (control == remote_session::control_e::running_game) continue;
+    const auto canonical = remote_session::synthetic(control);
+    EXPECT_NE(app.id, canonical.id);
+    EXPECT_EQ(app.uuid, canonical.uuid);  // Preserve custom covers and UUID launches.
+    const auto actual = remote_session::dispatch(other, active_game, {}, control);
+    const auto expected = remote_session::dispatch(other, active_game, {}, remote_session::identify(canonical.id));
+    EXPECT_EQ(actual.allowed, expected.allowed);
+    EXPECT_EQ(actual.permission, expected.permission);
+    EXPECT_EQ(actual.resume, expected.resume);
+    EXPECT_EQ(actual.resume_role, expected.resume_role);
+    EXPECT_EQ(actual.terminate, expected.terminate);
+    EXPECT_EQ(remote_session::synthetic_artwork_filename(control), remote_session::synthetic_artwork_filename(remote_session::identify(canonical.id)));
+    EXPECT_NE(remote_session::synthetic_running_game_id(app.id ^ 0x40000000), app.id);
+  }
 }
 
 TEST(RemoteSession, DispatchEnforcesCallerPermissionsAndRetention) {
@@ -145,11 +328,14 @@ TEST(RemoteSession, StaleDisconnectControlsAreIdempotentButCannotTargetAnotherRo
   EXPECT_FALSE(remote_session::dispatch(caller("input"), {}, {.role = remote_session::role_e::input}, remote_session::control_e::disconnect_monitor).allowed);
 }
 
-TEST(RemoteSession, SecondaryGameTransportJoinsExistingOutputOnlyWhileActive) {
+TEST(RemoteSession, SecondaryGameTransportJoinsActiveOrRetainedOutput) {
   EXPECT_TRUE(remote_session::joins_existing_game_output(remote_session::role_e::game, true));
   EXPECT_FALSE(remote_session::joins_existing_game_output(remote_session::role_e::game, false));
+  EXPECT_TRUE(remote_session::joins_existing_game_output(remote_session::role_e::game, false, true));
   EXPECT_FALSE(remote_session::joins_existing_game_output(remote_session::role_e::monitor, true));
+  EXPECT_FALSE(remote_session::joins_existing_game_output(remote_session::role_e::monitor, false, true));
   EXPECT_FALSE(remote_session::joins_existing_game_output(remote_session::role_e::input, true));
+  EXPECT_FALSE(remote_session::joins_existing_game_output(remote_session::role_e::input, false, true));
 }
 
 TEST(RemoteSession, ApplistResumeUsesLaunchResponseShape) {
@@ -188,6 +374,7 @@ TEST(RemoteSession, CapturePlanNeverFallsBackForSpecialRoles) {
 TEST(RemoteSession, ConvertsApolloSessionMillihertzBeforeCreatingDisplayModes) {
   EXPECT_EQ(remote_session::display_refresh_hz_from_session_fps(120000), 120);
   EXPECT_EQ(remote_session::display_refresh_hz_from_session_fps(119880), 120);
+  EXPECT_EQ(remote_session::display_refresh_hz_from_session_fps(59940), 60);
   EXPECT_EQ(remote_session::display_refresh_hz_from_session_fps(60), 60);
   EXPECT_EQ(remote_session::monitor_mode_from_session_fps(2560, 1440, 120000), "2560x1440@120");
 }
@@ -260,6 +447,43 @@ TEST(RemoteSession, TerminateAllowsMobileCatalogueRefreshWithinSixtySeconds) {
   remote_session::clear_termination_confirmation("other");
 }
 
+TEST(RemoteSession, AppReplacementConfirmationIsPerClientGameAndRequestedApp) {
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_EQ(
+    remote_session::arm_or_confirm_app_replacement("client", 7, 99, start),
+    remote_session::app_replacement_confirmation_e::prompt
+  );
+  EXPECT_TRUE(remote_session::app_replacement_confirmation_active("client", 7, start + std::chrono::seconds {1}));
+  EXPECT_FALSE(remote_session::app_replacement_confirmation_active("other", 7, start + std::chrono::seconds {1}));
+
+  EXPECT_EQ(
+    remote_session::arm_or_confirm_app_replacement("client", 7, 100, start + std::chrono::seconds {2}),
+    remote_session::app_replacement_confirmation_e::prompt
+  );
+  EXPECT_EQ(
+    remote_session::arm_or_confirm_app_replacement("client", 7, 100, start + std::chrono::seconds {3}),
+    remote_session::app_replacement_confirmation_e::confirmed
+  );
+  EXPECT_FALSE(remote_session::app_replacement_confirmation_active("client", 7, start + std::chrono::seconds {4}));
+
+  EXPECT_EQ(
+    remote_session::arm_or_confirm_app_replacement("client", 8, 101, start + std::chrono::seconds {5}),
+    remote_session::app_replacement_confirmation_e::prompt
+  );
+  EXPECT_FALSE(remote_session::app_replacement_confirmation_active("client", 7, start + std::chrono::seconds {6}));
+  EXPECT_EQ(
+    remote_session::arm_or_confirm_app_replacement("client", 8, 101, start + std::chrono::seconds {7}),
+    remote_session::app_replacement_confirmation_e::prompt
+  );
+  EXPECT_FALSE(remote_session::app_replacement_confirmation_active("client", 8, start + std::chrono::seconds {68}));
+
+  EXPECT_EQ(
+    remote_session::app_replacement_confirmation_message(),
+    "An app is already running. Launch this app again within 60 seconds to confirm that you want to close it."
+  );
+  remote_session::clear_app_replacement_confirmation("client");
+}
+
 TEST(RemoteSession, PendingRegistryKeepsEncryptedLaunchesDistinctAndPlaintextSafe) {
   remote_session::pending_registry_t registry;
   const auto expiry = std::chrono::steady_clock::now() + std::chrono::minutes(1);
@@ -298,7 +522,7 @@ TEST(RemoteSession, NormalAppTransitionGateSerializesProcessStartPublication) {
 
 TEST(RemoteSession, MonitorHooksRejectWithoutTopologyAndPreserveGeneration) {
   remote_session::register_monitor_runtime_hooks({});
-  const auto unavailable = remote_session::activate_or_resume_monitor("client", "Client", "1920x1080@60", 7);
+  const auto unavailable = remote_session::activate_or_resume_monitor("client", "Client", "1920x1080@60", true, 7);
   EXPECT_FALSE(unavailable.accepted);
   EXPECT_TRUE(unavailable.retryable);
 
@@ -311,6 +535,21 @@ TEST(RemoteSession, MonitorHooksRejectWithoutTopologyAndPreserveGeneration) {
   remote_session::register_monitor_runtime_hooks({});
 }
 
+TEST(RemoteSession, MonitorRuntimeTransportsHdrRequest) {
+  bool observed_hdr = false;
+  remote_session::register_monitor_runtime_hooks({
+    .activate_or_resume = [&observed_hdr](std::string_view, std::string_view, std::string_view, const bool hdr_requested, std::uint64_t) {
+      observed_hdr = hdr_requested;
+      return remote_session::monitor_runtime_state_t {.accepted = true, .ready = true, .hdr_enabled = hdr_requested};
+    },
+  });
+  const auto result = remote_session::activate_or_resume_monitor("client", "Client", "3840x2160@120", true, 8);
+  EXPECT_TRUE(result.ready);
+  EXPECT_TRUE(result.hdr_enabled);
+  EXPECT_TRUE(observed_hdr);
+  remote_session::register_monitor_runtime_hooks({});
+}
+
 TEST(RemoteSession, LayoutGraphRejectsInvalidAnchorsCyclesAndDuplicatePrimary) {
   const std::vector<std::string> clients {"a", "b"};
   const std::vector<std::string> physical {"DISPLAY1"};
@@ -319,4 +558,33 @@ TEST(RemoteSession, LayoutGraphRejectsInvalidAnchorsCyclesAndDuplicatePrimary) {
   EXPECT_FALSE(remote_session::validate_layout({{"a", "client", "b", "right", "center", 0, false}, {"b", "client", "a", "right", "center", 0, false}}, clients, physical, &error));
   EXPECT_FALSE(remote_session::validate_layout({{"a", "physical", "missing", "right", "center", 0, false}}, clients, physical, &error));
   EXPECT_FALSE(remote_session::validate_layout({{"a", "physical", "DISPLAY1", "right", "center", 0, true}, {"b", "physical", "DISPLAY1", "right", "center", 0, true}}, clients, physical, &error));
+}
+
+TEST(RemoteSession, DisabledInputHidesCatalogueAndRejectsCachedLaunchWithoutBlockingCleanup) {
+  auto disabled = caller("client");
+  disabled.input_enabled = false;
+  const std::vector<remote_session::app_t> configured {{42, "game", "Game", false}};
+  for (const auto active_game : {remote_session::game_t {}, game()}) {
+    for (bool active_peers : {false, true}) {
+      const auto projected = remote_session::project(disabled, active_game, {}, configured, active_peers);
+      for (const auto &entry : projected.catalogue) EXPECT_NE(entry.id, remote_session::input_id);
+    }
+  }
+  EXPECT_FALSE(remote_session::dispatch(disabled, {}, {}, remote_session::control_e::input).allowed);
+  EXPECT_TRUE(remote_session::dispatch(disabled, {}, {}, remote_session::control_e::monitor).allowed);
+  EXPECT_TRUE(remote_session::dispatch(disabled, game(), {}, remote_session::control_e::resume).allowed);
+  EXPECT_TRUE(remote_session::dispatch(disabled, {}, {.role = remote_session::role_e::input}, remote_session::control_e::disconnect_input).allowed);
+  EXPECT_TRUE(remote_session::dispatch(caller("client"), {}, {}, remote_session::control_e::input).allowed);
+  EXPECT_FALSE(remote_session::dispatch(caller("client", true, false), {}, {}, remote_session::control_e::input).allowed);
+}
+
+TEST(RemoteSession, MonitorCommandsHonorClientAndAppPolicyWithoutChangingInputIsolation) {
+  using remote_session::role_e;
+  for (bool client_allows : {false, true}) {
+    for (bool app_allows : {false, true}) {
+      EXPECT_FALSE(remote_session::allows_client_commands(role_e::input, client_allows, app_allows));
+      EXPECT_EQ(remote_session::allows_client_commands(role_e::monitor, client_allows, app_allows), client_allows && app_allows);
+      EXPECT_EQ(remote_session::allows_client_commands(role_e::game, client_allows, app_allows), client_allows && app_allows);
+    }
+  }
 }

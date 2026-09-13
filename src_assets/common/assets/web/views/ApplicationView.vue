@@ -1,9 +1,14 @@
 <script setup lang="ts">
+import { providerSupported } from '@/utils/providerCapabilities';
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { useUnsavedChanges } from '@/composables/useUnsavedChanges';
 import { useI18n } from 'vue-i18n';
 import { useRoute, useRouter } from 'vue-router';
 
+import { groupLibraryGames, providerLabels } from '@/utils/libraryGames';
 import { ApiError, apiGet, apiPost } from '@/api/client';
+import AppCompatibilitySettings from '@/components/app-edit/AppCompatibilitySettings.vue';
+import { parseAppExtras } from '@/utils/appCompatibility';
 import AppEditCoverModal from '@/components/app-edit/AppEditCoverModal.vue';
 import type { CoverCandidate } from '@/components/app-edit/AppEditCoverModal.types';
 import {
@@ -30,6 +35,10 @@ import {
 import { searchCovers, updatePlayniteCover, uploadCover } from '@/services/covers';
 import {
   settingsCategories,
+  settingsFields,
+  fieldForPlatform,
+  matchesPlatform,
+  optionsForPlatform,
   settingsDefaults,
   type SettingsField,
   type SettingsOption,
@@ -53,6 +62,27 @@ interface EditorForm {
   playniteIconPath: string;
   playniteId: string;
   playniteManaged: string;
+  steamId: string;
+  steamManaged: string;
+  steamSource: string;
+  steamInstallDir: string;
+  steamLibraryPath: string;
+  steamIconPath: string;
+  steamHeaderPath: string;
+  steamBoxartPath: string;
+  steamArtworkPath: string;
+  steamArtworkClientPath: string;
+  steamArtworkFormat: string;
+  steamAppType: string;
+  steamArtworkClientCompatible: boolean | null;
+  lutrisId: string;
+  lutrisManaged: string;
+  lutrisSlug: string;
+  lutrisRunner: string;
+  lutrisPlatform: string;
+  lutrisDirectory: string;
+  lutrisService: string;
+  lutrisServiceId: string;
   elevated: boolean;
   autoDetach: boolean;
   waitAll: boolean;
@@ -61,6 +91,7 @@ interface EditorForm {
   virtualScreen: boolean;
   virtualDisplayMode: string;
   virtualDisplayLayout: string;
+  prefer10BitSdr: boolean | null;
   ddConfigurationOption: string;
   frameGenerationProvider: string;
   frameGenerationMode: string;
@@ -119,6 +150,43 @@ interface PlayniteGame {
 interface PlayniteStatus {
   active?: boolean;
   installed?: boolean | null;
+}
+
+interface SteamGame {
+  installed: boolean;
+  filtered: boolean;
+  appid: number | string;
+  steamId: string;
+  stableId: string;
+  name: string;
+  installDir: string;
+  libraryPath: string;
+  iconPath: string;
+  headerPath: string;
+  portraitPath: string;
+  boxartPath: string;
+  artworkPath: string;
+  artworkClientPath: string;
+  artworkFormat: string;
+  artworkClientCompatible: boolean | null;
+  appType: string;
+  launchUri: string;
+  lastPlayed: number;
+  playtimeMinutes: number;
+}
+
+interface LutrisGame {
+  id: string;
+  name: string;
+  slug: string;
+  runner: string;
+  platform: string;
+  directory: string;
+  service: string;
+  serviceId: string;
+  imagePath: string;
+  launchUri: string;
+  filtered: boolean;
 }
 
 interface FrameGenConfig extends Record<string, unknown> {
@@ -248,13 +316,23 @@ const coverSearchQuery = ref('');
 const deleteOpen = ref(false);
 const deleteError = ref('');
 const errors = reactive<Record<string, string>>({});
-const playnitePickerOpen = ref(false);
+const gamePickerOpen = ref(false);
 const playniteGames = ref<PlayniteGame[]>([]);
 const playniteGamesLoaded = ref(false);
 const playniteGamesLoading = ref(false);
 const playniteGamesError = ref('');
 const playniteGamesUnavailable = ref(false);
-const playniteActiveIndex = ref(-1);
+const gameActiveIndex = ref(-1);
+const steamGames = ref<SteamGame[]>([]);
+const steamGamesLoaded = ref(false);
+const steamGamesLoading = ref(false);
+const steamGamesError = ref('');
+const steamGamesUnavailable = ref(false);
+const lutrisGames = ref<LutrisGame[]>([]);
+const lutrisGamesLoaded = ref(false);
+const lutrisGamesLoading = ref(false);
+const lutrisGamesError = ref('');
+const lutrisGamesUnavailable = ref(false);
 const frameGenHealth = ref<FrameGenHealth | null>(null);
 const frameGenHealthError = ref('');
 const frameGenHealthLoading = ref(false);
@@ -262,7 +340,8 @@ let frameGenHealthEpoch = 0;
 let frameGenHealthRequest: { epoch: number; promise: Promise<void> } | null = null;
 let formHydrating = false;
 let formHydrationEpoch = 0;
-let playniteCloseTimer: number | null = null;
+let gameCloseTimer: number | null = null;
+let selectedSteamArtworkRequest: Promise<void> | undefined;
 const form = reactive<EditorForm>(emptyForm());
 const overrideMetadata = ref<FrameGenMetadata>({});
 const originalRtxHdrLiveOverrides = ref<Record<string, unknown>>({});
@@ -428,17 +507,78 @@ const rtxHdrCalibrationFields = computed<RtxHdrCalibrationField[]>(() => [
   },
 ]);
 const isPlayniteLinked = computed(() => Boolean(form.playniteId.trim()));
-const filteredPlayniteGames = computed(() => {
-  const query = form.name.trim().toLocaleLowerCase();
-  const games = playniteGames.value.filter((game) => game.installed !== false);
-  return query ? games.filter((game) => game.name.toLocaleLowerCase().includes(query)) : games;
-});
+const isSteamLinked = computed(() => Boolean(form.steamId.trim()));
+const isLutrisLinked = computed(() => Boolean(form.lutrisId.trim()));
+const isProviderLinked = computed(
+  () => isPlayniteLinked.value || isSteamLinked.value || isLutrisLinked.value,
+);
+
+function managedProviderLabel(provider: string, managed: string): string {
+  return managed === 'auto' ? t('ui.application.providers.managed', { provider }) : provider;
+}
+const hasLibraryProvider = computed(() => isWindowsHost.value ||
+  providerSupported(overrideMetadata.value, 'steam') || providerSupported(overrideMetadata.value, 'lutris'));
+type LibraryEntry =
+  | { provider: 'playnite'; id: string; name: string; game: PlayniteGame }
+  | { provider: 'steam'; id: string; name: string; game: SteamGame }
+  | { provider: 'lutris'; id: string; name: string; game: LutrisGame };
+const libraryEntries = computed<LibraryEntry[]>(() => [
+  ...playniteGames.value
+    .filter((game) => game.installed !== false)
+    .map((game) => ({
+      provider: 'playnite' as const,
+      id: game.id,
+      name: game.name,
+      game,
+    })),
+  ...steamGames.value
+    .filter((game) => game.installed && !game.filtered)
+    .map((game) => ({
+      provider: 'steam' as const,
+      id: game.steamId,
+      name: game.name,
+      game,
+    })),
+  ...lutrisGames.value
+    .filter((game) => !game.filtered)
+    .map((game) => ({
+      provider: 'lutris' as const,
+      id: game.id,
+      name: game.name,
+      game,
+    })),
+]);
+const filteredLibraryGames = computed(() => groupLibraryGames(libraryEntries.value, form.name));
+const libraryGamesLoading = computed(
+  () => playniteGamesLoading.value || steamGamesLoading.value || lutrisGamesLoading.value,
+);
+const libraryGamesErrors = computed(() =>
+  [playniteGamesError.value, steamGamesError.value, lutrisGamesError.value].filter(Boolean),
+);
+const selectedLibraryKey = computed(() =>
+  form.playniteId
+    ? 'playnite:' + form.playniteId
+    : form.steamId
+      ? 'steam:' + form.steamId
+      : form.lutrisId
+        ? 'lutris:' + form.lutrisId
+        : '',
+);
+const selectedLibraryAlternatives = computed(
+  () =>
+    groupLibraryGames(libraryEntries.value).find((group) =>
+      group.entries.some((entry) => entry.provider + ':' + entry.id === selectedLibraryKey.value),
+    )?.entries ?? [],
+);
 const frameGenerationEnabled = computed(() => {
   if (form.frameGenerationMode === 'off') return false;
   return Boolean(form.frameGenerationMode);
 });
 const isWindowsHost = computed(() =>
   asString(overrideMetadata.value.platform).toLocaleLowerCase().includes('windows'),
+);
+const isLinuxHost = computed(() =>
+  asString(overrideMetadata.value.platform).toLocaleLowerCase().includes('linux'),
 );
 const hasNvidiaGpu = computed(() => {
   if (typeof overrideMetadata.value.has_nvidia_gpu === 'boolean') {
@@ -555,6 +695,7 @@ const overrideCatalogGroups = computed(() => {
       fields: category.groups
         .flatMap((group) => group.fields)
         .filter((field) => {
+          if (!matchesPlatform(field, String(overrideMetadata.value.platform ?? ''))) return false;
           if (
             !overrideVisibleForDisplay(field.key) ||
             field.key === 'adapter_pnp_id' ||
@@ -816,7 +957,8 @@ function resetRtxHdrCalibration(): void {
 }
 
 function overrideField(key: string): SettingsField | undefined {
-  return overrideFieldsByKey.value.get(key);
+  const field = settingsFields.get(key);
+  return field ? fieldForPlatform(field, String(overrideMetadata.value.platform ?? '')) : undefined;
 }
 
 function overrideMessageExists(key: string): boolean {
@@ -918,36 +1060,9 @@ function overrideSelectOptions(key: string): Array<{ label: string; value: strin
     return overrideGpuOptions().map(({ label, value }) => ({ label, value }));
   }
 
-  let declaredOptions = field?.options ?? [];
-  if (key === 'encoder') {
-    const auto: SettingsOption = { value: '', labelKey: '_common.auto' };
-    const platform = String(overrideMetadata.value.platform ?? '').toLocaleLowerCase();
-    declaredOptions = platform.includes('windows')
-      ? [
-          auto,
-          { value: 'nvenc', labelKey: 'ui.settings.options.encoder.nvenc' },
-          { value: 'quicksync', labelKey: 'ui.settings.options.encoder.quicksync' },
-          { value: 'amdvce_ffmpeg', labelKey: 'ui.settings.options.encoder.amdvce_ffmpeg' },
-          { value: 'amdvce_experimental', labelKey: 'ui.settings.options.encoder.amdvce_experimental' },
-          { value: 'mediafoundation', labelKey: 'ui.settings.options.encoder.mediafoundation' },
-          { value: 'software', labelKey: 'ui.settings.options.encoder.software' },
-        ]
-      : platform.includes('mac')
-        ? [
-            auto,
-            { value: 'videotoolbox', labelKey: 'ui.settings.options.encoder.videotoolbox' },
-            { value: 'software', labelKey: 'ui.settings.options.encoder.software' },
-          ]
-        : platform
-          ? [
-              auto,
-              { value: 'nvenc', labelKey: 'ui.settings.options.encoder.nvenc' },
-              { value: 'vulkan', labelKey: 'ui.settings.options.encoder.vulkan' },
-              { value: 'vaapi', labelKey: 'ui.settings.options.encoder.vaapi' },
-              { value: 'software', labelKey: 'ui.settings.options.encoder.software' },
-            ]
-          : [auto];
-  }
+  const declaredOptions = field
+    ? optionsForPlatform(field, String(overrideMetadata.value.platform ?? ''))
+    : [];
 
   const options = declaredOptions.map((option) => ({
     label: overrideOptionLabel(option),
@@ -1061,6 +1176,27 @@ const editableKeys = new Set([
   'playnite-icon-path',
   'playnite-id',
   'playnite-managed',
+  'steam-id',
+  'steam-managed',
+  'steam-source',
+  'steam-install-dir',
+  'steam-library-path',
+  'steam-icon-path',
+  'steam-header-path',
+  'steam-boxart-path',
+  'steam-artwork-path',
+  'steam-artwork-client-path',
+  'steam-artwork-format',
+  'steam-artwork-client-compatible',
+  'steam-app-type',
+  'lutris-id',
+  'lutris-managed',
+  'lutris-slug',
+  'lutris-runner',
+  'lutris-platform',
+  'lutris-directory',
+  'lutris-service',
+  'lutris-service-id',
   'elevated',
   'auto-detach',
   'wait-all',
@@ -1069,6 +1205,7 @@ const editableKeys = new Set([
   'virtual-screen',
   'virtual-display-mode',
   'virtual-display-layout',
+  'prefer-10bit-sdr',
   'dd-configuration-option',
   'frame-generation-provider',
   'frame-generation-mode',
@@ -1085,7 +1222,13 @@ const editableKeys = new Set([
   'detached',
   'config-overrides',
 ]);
-const transientKeys = new Set(['id', 'index', 'image-version', 'playnite-icon-version', 'remote-session']);
+const transientKeys = new Set([
+  'id',
+  'index',
+  'image-version',
+  'playnite-icon-version',
+  'remote-session',
+]);
 
 function newUuid(): string {
   return crypto.randomUUID();
@@ -1103,6 +1246,27 @@ function emptyForm(): EditorForm {
     playniteIconPath: '',
     playniteId: '',
     playniteManaged: '',
+    steamId: '',
+    steamManaged: '',
+    steamSource: '',
+    steamInstallDir: '',
+    steamLibraryPath: '',
+    steamIconPath: '',
+    steamHeaderPath: '',
+    steamBoxartPath: '',
+    steamArtworkPath: '',
+    steamArtworkClientPath: '',
+    steamArtworkFormat: '',
+    steamAppType: '',
+    steamArtworkClientCompatible: null,
+    lutrisId: '',
+    lutrisManaged: '',
+    lutrisSlug: '',
+    lutrisRunner: '',
+    lutrisPlatform: '',
+    lutrisDirectory: '',
+    lutrisService: '',
+    lutrisServiceId: '',
     elevated: false,
     autoDetach: false,
     waitAll: false,
@@ -1112,6 +1276,7 @@ function emptyForm(): EditorForm {
     virtualDisplayMode: '',
     virtualDisplayLayout: '',
     ddConfigurationOption: '',
+    prefer10BitSdr: null,
     frameGenerationProvider: '',
     frameGenerationMode: '',
     gen1FramegenFix: false,
@@ -1137,6 +1302,13 @@ function emptyForm(): EditorForm {
   };
 }
 
+const appCompatibility = computed({
+  get: () => parseAppExtras(form.advancedJson),
+  set: (value) => {
+    if (value) form.advancedJson = jsonText(value);
+  },
+});
+
 const routeId = computed(() => (typeof route.params.id === 'string' ? route.params.id : ''));
 const isNew = computed(() => route.name === 'application-new' || !routeId.value);
 const isRemoteSession = computed(() => {
@@ -1152,6 +1324,15 @@ const isDirty = computed(
   () =>
     isNew.value ||
     (Boolean(initialSnapshot.value) && JSON.stringify(form) !== initialSnapshot.value),
+);
+const leavingAfterSave = ref(false);
+useUnsavedChanges(
+  computed(
+    () =>
+      !leavingAfterSave.value &&
+      Boolean(initialSnapshot.value) &&
+      JSON.stringify(form) !== initialSnapshot.value,
+  ),
 );
 const errorMessages = computed(() => Object.values(errors));
 const sourceCoverUrl = computed(() => (sourceApp.value ? appCoverUrl(sourceApp.value) : ''));
@@ -1326,6 +1507,30 @@ function hydrate(app: AppRecord): void {
     playniteIconPath: asString(app['playnite-icon-path']),
     playniteId: asString(app['playnite-id']),
     playniteManaged: asString(app['playnite-managed']),
+    steamId: asString(app['steam-id']),
+    steamManaged: asString(app['steam-managed']),
+    steamSource: asString(app['steam-source']),
+    steamInstallDir: asString(app['steam-install-dir']),
+    steamLibraryPath: asString(app['steam-library-path']),
+    steamIconPath: asString(app['steam-icon-path']),
+    steamHeaderPath: asString(app['steam-header-path']),
+    steamBoxartPath: asString(app['steam-boxart-path']),
+    steamArtworkPath: asString(app['steam-artwork-path']),
+    steamArtworkClientPath: asString(app['steam-artwork-client-path']),
+    steamArtworkFormat: asString(app['steam-artwork-format']),
+    steamAppType: asString(app['steam-app-type']),
+    steamArtworkClientCompatible:
+      typeof app['steam-artwork-client-compatible'] === 'boolean'
+        ? app['steam-artwork-client-compatible']
+        : null,
+    lutrisId: asString(app['lutris-id']),
+    lutrisManaged: asString(app['lutris-managed']),
+    lutrisSlug: asString(app['lutris-slug']),
+    lutrisRunner: asString(app['lutris-runner']),
+    lutrisPlatform: asString(app['lutris-platform']),
+    lutrisDirectory: asString(app['lutris-directory']),
+    lutrisService: asString(app['lutris-service']),
+    lutrisServiceId: asString(app['lutris-service-id']),
     elevated: asBoolean(app.elevated),
     autoDetach: asBoolean(app['auto-detach']),
     waitAll: asBoolean(app['wait-all']),
@@ -1334,6 +1539,7 @@ function hydrate(app: AppRecord): void {
     virtualScreen: asBoolean(app['virtual-screen']),
     virtualDisplayMode: asString(app['virtual-display-mode']),
     virtualDisplayLayout: asString(app['virtual-display-layout']),
+    prefer10BitSdr: app['prefer-10bit-sdr'] == null ? null : asBoolean(app['prefer-10bit-sdr']),
     ddConfigurationOption: asString(app['dd-configuration-option']),
     frameGenerationProvider: asString(app['frame-generation-provider']),
     frameGenerationMode: frameGenerationModeFor(app),
@@ -1365,9 +1571,9 @@ function hydrate(app: AppRecord): void {
   coverPickerOpen.value = false;
   clearErrors();
   initialSnapshot.value = JSON.stringify(form);
-  cancelPlayniteClose();
-  playnitePickerOpen.value = false;
-  playniteActiveIndex.value = -1;
+  cancelGameClose();
+  gamePickerOpen.value = false;
+  gameActiveIndex.value = -1;
   clearFrameGenHealth();
   liveRtxHdrSuppress = true;
   primeLiveRtxHdrState(app);
@@ -1388,9 +1594,9 @@ function hydrateNew(): void {
   coverPickerOpen.value = false;
   clearErrors();
   initialSnapshot.value = JSON.stringify(form);
-  cancelPlayniteClose();
-  playnitePickerOpen.value = false;
-  playniteActiveIndex.value = -1;
+  cancelGameClose();
+  gamePickerOpen.value = false;
+  gameActiveIndex.value = -1;
   clearFrameGenHealth();
   liveRtxHdrSuppress = true;
   primeLiveRtxHdrState(null);
@@ -1435,6 +1641,13 @@ function clearErrors(): void {
 
 async function validate(): Promise<boolean> {
   clearErrors();
+  const invalidCompatibilityInput = document.querySelector<HTMLInputElement>(
+    '.app-compatibility input[data-edited="true"]:invalid',
+  );
+  if (invalidCompatibilityInput) {
+    invalidCompatibilityInput.reportValidity();
+    return false;
+  }
   if (!form.name.trim()) errors.name = t('ui.application.validation.nameRequired');
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(form.uuid)) {
     errors.uuid = t('ui.application.validation.uuidInvalid');
@@ -1456,6 +1669,11 @@ function setOptionalString(payload: AppRecord, key: string, value: string): void
 function setOptionalInteger(payload: AppRecord, key: string, value: string): void {
   if (value.trim()) payload[key] = Number(value);
   else delete payload[key];
+}
+
+function setOptionalBoolean(payload: AppRecord, key: string, value: boolean | null): void {
+  if (value === null) delete payload[key];
+  else payload[key] = value;
 }
 
 function buildPayload(): AppRecord {
@@ -1502,8 +1720,30 @@ function buildPayload(): AppRecord {
   setOptionalString(payload, 'playnite-icon-path', form.playniteIconPath);
   setOptionalString(payload, 'playnite-id', form.playniteId);
   setOptionalString(payload, 'playnite-managed', form.playniteManaged);
+  setOptionalString(payload, 'steam-id', form.steamId);
+  setOptionalString(payload, 'steam-managed', form.steamManaged);
+  setOptionalString(payload, 'steam-source', form.steamSource);
+  setOptionalString(payload, 'steam-install-dir', form.steamInstallDir);
+  setOptionalString(payload, 'steam-library-path', form.steamLibraryPath);
+  setOptionalString(payload, 'steam-icon-path', form.steamIconPath);
+  setOptionalString(payload, 'steam-header-path', form.steamHeaderPath);
+  setOptionalString(payload, 'steam-boxart-path', form.steamBoxartPath);
+  setOptionalString(payload, 'steam-artwork-path', form.steamArtworkPath);
+  setOptionalString(payload, 'steam-artwork-client-path', form.steamArtworkClientPath);
+  setOptionalString(payload, 'steam-artwork-format', form.steamArtworkFormat);
+  setOptionalString(payload, 'steam-app-type', form.steamAppType);
+  setOptionalBoolean(payload, 'steam-artwork-client-compatible', form.steamArtworkClientCompatible);
+  setOptionalString(payload, 'lutris-id', form.lutrisId);
+  setOptionalString(payload, 'lutris-managed', form.lutrisManaged);
+  setOptionalString(payload, 'lutris-slug', form.lutrisSlug);
+  setOptionalString(payload, 'lutris-runner', form.lutrisRunner);
+  setOptionalString(payload, 'lutris-platform', form.lutrisPlatform);
+  setOptionalString(payload, 'lutris-directory', form.lutrisDirectory);
+  setOptionalString(payload, 'lutris-service', form.lutrisService);
+  setOptionalString(payload, 'lutris-service-id', form.lutrisServiceId);
   setOptionalString(payload, 'virtual-display-mode', form.virtualDisplayMode);
   setOptionalString(payload, 'virtual-display-layout', form.virtualDisplayLayout);
+  setOptionalBoolean(payload, 'prefer-10bit-sdr', form.prefer10BitSdr);
   setOptionalString(payload, 'dd-configuration-option', form.ddConfigurationOption);
   setOptionalString(payload, 'frame-generation-provider', form.frameGenerationProvider);
   setOptionalString(payload, 'frame-generation-mode', form.frameGenerationMode);
@@ -1516,14 +1756,51 @@ function buildPayload(): AppRecord {
 }
 
 function clearPlayniteLink(): void {
+  form.playniteIconPath = '';
   form.playniteId = '';
   form.playniteManaged = '';
 }
 
-function cancelPlayniteClose(): void {
-  if (playniteCloseTimer === null) return;
-  window.clearTimeout(playniteCloseTimer);
-  playniteCloseTimer = null;
+function canonicalSteamUuid(steamId: string): string {
+  try {
+    const suffix = BigInt(steamId).toString(16).padStart(12, '0').slice(-12);
+    return `53544541-4d00-5000-8000-${suffix}`;
+  } catch {
+    return '';
+  }
+}
+
+function clearSteamLink(): void {
+  form.steamId = '';
+  form.steamManaged = '';
+  form.steamSource = '';
+  form.steamInstallDir = '';
+  form.steamLibraryPath = '';
+  form.steamIconPath = '';
+  form.steamHeaderPath = '';
+  form.steamBoxartPath = '';
+  form.steamArtworkPath = '';
+  form.steamArtworkClientPath = '';
+  form.steamArtworkFormat = '';
+  form.steamAppType = '';
+  form.steamArtworkClientCompatible = null;
+}
+
+function clearLutrisLink(): void {
+  form.lutrisId = '';
+  form.lutrisManaged = '';
+  form.lutrisSlug = '';
+  form.lutrisRunner = '';
+  form.lutrisPlatform = '';
+  form.lutrisDirectory = '';
+  form.lutrisService = '';
+  form.lutrisServiceId = '';
+}
+
+function cancelGameClose(): void {
+  if (gameCloseTimer === null) return;
+  window.clearTimeout(gameCloseTimer);
+  gameCloseTimer = null;
 }
 
 function waitForPlaynite(milliseconds: number): Promise<void> {
@@ -1578,27 +1855,262 @@ async function loadPlayniteGames(): Promise<void> {
   }
 }
 
-function openPlaynitePicker(): void {
-  if (!isNew.value) return;
-  cancelPlayniteClose();
-  if (playniteGamesUnavailable.value) playniteGamesLoaded.value = false;
-  playnitePickerOpen.value = true;
-  playniteActiveIndex.value = -1;
-  void loadPlayniteGames();
+function steamGame(value: unknown): SteamGame | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const game = value as Record<string, unknown>;
+  const rawId = game.appid ?? game.steam_id;
+  const appid = typeof rawId === 'number' || typeof rawId === 'string' ? rawId : '';
+  const steamId = asString(game.steam_id) || String(appid);
+  const name = asString(game.name) || (steamId ? `Steam ${steamId}` : '');
+  if (!steamId || !name) return null;
+  return {
+    appid,
+    steamId,
+    installed: game.installed === undefined ? true : asBoolean(game.installed),
+    filtered: asBoolean(game.filtered),
+    stableId: asString(game.stable_id),
+    name,
+    installDir: asString(game.install_dir),
+    libraryPath: asString(game.library_path),
+    iconPath: asString(game.icon_path),
+    headerPath: asString(game.header_path),
+    portraitPath: asString(game.portrait_path),
+    boxartPath: asString(game.boxart_path),
+    artworkPath: asString(game.artwork_path),
+    artworkClientPath: asString(game.artwork_client_path),
+    artworkFormat: asString(game.artwork_format),
+    artworkClientCompatible:
+      typeof game.artwork_client_compatible === 'boolean' ? game.artwork_client_compatible : null,
+    appType: asString(game.app_type),
+    launchUri: asString(game.launch_uri) || `steam://rungameid/${steamId}`,
+    lastPlayed: Number(game.last_played) || 0,
+    playtimeMinutes: Number(game.playtime_minutes) || 0,
+  };
 }
 
-function closePlaynitePicker(): void {
-  cancelPlayniteClose();
-  playniteCloseTimer = window.setTimeout(() => {
-    playnitePickerOpen.value = false;
-    playniteActiveIndex.value = -1;
-    playniteCloseTimer = null;
+async function loadSteamGames(): Promise<void> {
+  if (steamGamesLoading.value || steamGamesLoaded.value) return;
+  steamGamesLoading.value = true;
+  steamGamesError.value = '';
+  steamGamesUnavailable.value = false;
+  try {
+    const payload = await apiGet<unknown>('/api/steam/games');
+    if (
+      payload &&
+      typeof payload === 'object' &&
+      'enabled' in payload &&
+      payload.enabled === false
+    ) {
+      steamGames.value = [];
+      steamGamesLoaded.value = true;
+      return;
+    }
+    const rawGames =
+      payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? (payload as { games?: unknown }).games
+        : payload;
+    steamGames.value = (Array.isArray(rawGames) ? rawGames : [])
+      .map(steamGame)
+      .filter((game): game is SteamGame => Boolean(game))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    steamGamesUnavailable.value = false;
+    steamGamesLoaded.value = true;
+  } catch {
+    steamGamesError.value = t('ui.application.steam.loadFailed');
+    steamGamesUnavailable.value = true;
+  } finally {
+    steamGamesLoading.value = false;
+  }
+}
+
+function lutrisGame(value: unknown): LutrisGame | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const game = value as Record<string, unknown>;
+  const id = asString(game.lutris_id) || asString(game.id);
+  const name = asString(game.name) || (id ? `Lutris ${id}` : '');
+  if (!id || !name) return null;
+  return {
+    id,
+    name,
+    slug: asString(game.slug),
+    runner: asString(game.runner),
+    platform: asString(game.platform),
+    directory: asString(game.directory),
+    service: asString(game.service),
+    serviceId: asString(game.service_id),
+    imagePath: asString(game.image_path),
+    launchUri: asString(game.launch_uri) || `lutris:rungameid/${id}`,
+    filtered: asBoolean(game.filtered),
+  };
+}
+
+async function loadLutrisGames(): Promise<void> {
+  if (lutrisGamesLoading.value || lutrisGamesLoaded.value) return;
+  lutrisGamesLoading.value = true;
+  lutrisGamesError.value = '';
+  lutrisGamesUnavailable.value = false;
+  try {
+    const payload = await apiGet<unknown>('/api/lutris/games');
+    if (
+      payload &&
+      typeof payload === 'object' &&
+      'enabled' in payload &&
+      payload.enabled === false
+    ) {
+      lutrisGames.value = [];
+      lutrisGamesLoaded.value = true;
+      return;
+    }
+    const rawGames =
+      payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? (payload as { games?: unknown }).games
+        : payload;
+    lutrisGames.value = (Array.isArray(rawGames) ? rawGames : [])
+      .map(lutrisGame)
+      .filter((game): game is LutrisGame => Boolean(game))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    lutrisGamesUnavailable.value = false;
+    lutrisGamesLoaded.value = true;
+  } catch {
+    lutrisGamesError.value = t('ui.application.lutris.loadFailed');
+    lutrisGamesUnavailable.value = true;
+  } finally {
+    lutrisGamesLoading.value = false;
+  }
+}
+
+function openGamePicker(): void {
+  if (!isNew.value || !hasLibraryProvider.value) return;
+  cancelGameClose();
+  gamePickerOpen.value = true;
+  gameActiveIndex.value = -1;
+  if (playniteGamesUnavailable.value) playniteGamesLoaded.value = false;
+  if (steamGamesUnavailable.value) steamGamesLoaded.value = false;
+  if (lutrisGamesUnavailable.value) lutrisGamesLoaded.value = false;
+  if (isWindowsHost.value) void loadPlayniteGames();
+  if (providerSupported(overrideMetadata.value, 'steam')) void loadSteamGames();
+  if (providerSupported(overrideMetadata.value, 'lutris')) void loadLutrisGames();
+}
+
+function closeGamePicker(): void {
+  cancelGameClose();
+  gameCloseTimer = window.setTimeout(() => {
+    gamePickerOpen.value = false;
+    gameActiveIndex.value = -1;
+    gameCloseTimer = null;
   }, 120);
 }
 
-function selectPlayniteGame(game: PlayniteGame): void {
-  cancelPlayniteClose();
+function selectLibraryGame(entry: LibraryEntry): void {
+  cancelGameClose();
+  if (entry.provider === 'playnite') selectPlayniteGame(entry.game);
+  else if (entry.provider === 'steam') selectSteamGame(entry.game);
+  else selectLutrisGame(entry.game);
+  gamePickerOpen.value = false;
+  gameActiveIndex.value = -1;
+}
+
+function changeLibrary(event: Event): void {
+  const key = (event.target as HTMLSelectElement).value;
+  const entry = selectedLibraryAlternatives.value.find(
+    (entry) => entry.provider + ':' + entry.id === key,
+  );
+  if (entry) selectLibraryGame(entry);
+}
+
+function steamCommand(uri: string): string {
+  const platform = asString(overrideMetadata.value.platform).toLocaleLowerCase();
+  if (platform.includes('windows')) return `cmd /c start "" ${uri}`;
+  if (platform.includes('mac') || platform.includes('darwin')) return `open ${uri}`;
+  return `xdg-open ${uri}`;
+}
+
+function selectSteamGame(game: SteamGame): void {
+  clearPlayniteLink();
+  clearLutrisLink();
   form.name = game.name;
+  form.uuid = canonicalSteamUuid(game.steamId) || newUuid();
+  form.steamId = game.steamId;
+  form.steamManaged = 'manual';
+  form.steamSource = game.installed ? 'installed' : 'library';
+  form.steamInstallDir = game.installDir;
+  form.steamLibraryPath = game.libraryPath;
+  form.steamIconPath = game.iconPath;
+  form.steamHeaderPath = game.headerPath;
+  form.steamBoxartPath = game.boxartPath || game.portraitPath;
+  form.steamArtworkPath = game.artworkPath;
+  form.steamArtworkClientPath = game.artworkClientPath;
+  form.steamArtworkFormat = game.artworkFormat;
+  form.steamAppType = game.appType;
+  form.steamArtworkClientCompatible = game.artworkClientCompatible;
+  form.playniteIconPath = '';
+  form.cmd = steamCommand(game.launchUri);
+  form.autoDetach = true;
+  form.waitAll = false;
+  form.workingDir = game.installDir;
+  form.imagePath = game.artworkClientPath || './assets/steam.png';
+  if (!game.artworkClientPath) selectedSteamArtworkRequest = loadSelectedSteamArtwork(game.steamId);
+  selectedCoverPreview.value = '';
+  coverPickerOpen.value = false;
+}
+
+async function loadSelectedSteamArtwork(steamId: string): Promise<void> {
+  try {
+    const payload = await apiGet<{ games?: unknown[] }>(
+      `/api/steam/games?appid=${encodeURIComponent(steamId)}`,
+    );
+    const game = steamGame(payload.games?.[0]);
+    if (
+      form.steamId !== steamId ||
+      form.imagePath !== './assets/steam.png' ||
+      !game?.artworkClientPath
+    )
+      return;
+    form.imagePath = game.artworkClientPath;
+    form.steamArtworkClientPath = game.artworkClientPath;
+    form.steamArtworkClientCompatible = true;
+  } catch {
+    // The built-in cover remains usable when Steam's cache/CDN is unavailable.
+  }
+}
+
+function canonicalLutrisUuid(lutrisId: string): string {
+  try {
+    const suffix = BigInt(lutrisId).toString(16).padStart(12, '0').slice(-12);
+    return `4c555452-4953-5000-8000-${suffix}`;
+  } catch {
+    return '';
+  }
+}
+
+function selectLutrisGame(game: LutrisGame): void {
+  clearPlayniteLink();
+  clearSteamLink();
+  form.name = game.name;
+  form.uuid = canonicalLutrisUuid(game.id) || newUuid();
+  form.lutrisId = game.id;
+  form.lutrisManaged = 'manual';
+  form.lutrisSlug = game.slug;
+  form.lutrisRunner = game.runner;
+  form.lutrisPlatform = game.platform;
+  form.lutrisDirectory = game.directory;
+  form.lutrisService = game.service;
+  form.lutrisServiceId = game.serviceId;
+  form.cmd = `lutris ${game.launchUri}`;
+  form.autoDetach = true;
+  form.waitAll = false;
+  form.workingDir = game.directory;
+  form.imagePath = game.imagePath || './assets/box.png';
+  selectedCoverPreview.value = '';
+  coverPickerOpen.value = false;
+}
+
+function selectPlayniteGame(game: PlayniteGame): void {
+  cancelGameClose();
+  clearSteamLink();
+  clearLutrisLink();
+  form.name = game.name;
+  form.uuid = newUuid();
   form.playniteId = game.id;
   form.playniteManaged = 'manual';
   form.cmd = '';
@@ -1607,8 +2119,8 @@ function selectPlayniteGame(game: PlayniteGame): void {
   selectedCoverPreview.value = '';
   coverPickerOpen.value = false;
   form.playniteIconPath = '';
-  playnitePickerOpen.value = false;
-  playniteActiveIndex.value = -1;
+  gamePickerOpen.value = false;
+  gameActiveIndex.value = -1;
 }
 
 async function openCoverPicker(): Promise<void> {
@@ -1659,49 +2171,43 @@ async function chooseCover(cover: CoverCandidate): Promise<void> {
 }
 
 function useCustomApplication(): void {
-  cancelPlayniteClose();
+  cancelGameClose();
   clearPlayniteLink();
-  playnitePickerOpen.value = false;
-  playniteActiveIndex.value = -1;
+  gamePickerOpen.value = false;
+  gameActiveIndex.value = -1;
+  clearSteamLink();
+  clearLutrisLink();
 }
 
 function handleNameInput(): void {
   if (isPlayniteLinked.value) clearPlayniteLink();
-  if (!isNew.value) return;
-  playniteActiveIndex.value = -1;
-  openPlaynitePicker();
+  if (isSteamLinked.value) clearSteamLink();
+  if (isLutrisLinked.value) clearLutrisLink();
+  openGamePicker();
 }
 
-function movePlayniteActiveOption(delta: number): void {
-  const count = filteredPlayniteGames.value.length;
-  if (!count) return;
-  const current = playniteActiveIndex.value;
-  if (current < 0) {
-    playniteActiveIndex.value = delta < 0 ? count - 1 : 0;
-    return;
-  }
-  playniteActiveIndex.value = (current + delta + count) % count;
-}
 
 function handleNameKeydown(event: KeyboardEvent): void {
   if (!isNew.value) return;
-  if (event.key === 'ArrowDown') {
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     event.preventDefault();
-    if (!playnitePickerOpen.value) openPlaynitePicker();
-    movePlayniteActiveOption(1);
-  } else if (event.key === 'ArrowUp') {
+    if (!gamePickerOpen.value) openGamePicker();
+    const count = filteredLibraryGames.value.length;
+    if (!count) return;
+    const delta = event.key === 'ArrowDown' ? 1 : -1;
+    gameActiveIndex.value =
+      gameActiveIndex.value < 0
+        ? delta > 0
+          ? 0
+          : count - 1
+        : (gameActiveIndex.value + delta + count) % count;
+  } else if (event.key === 'Enter' && gamePickerOpen.value) {
     event.preventDefault();
-    if (!playnitePickerOpen.value) openPlaynitePicker();
-    movePlayniteActiveOption(-1);
-  } else if (event.key === 'Enter' && playnitePickerOpen.value) {
-    event.preventDefault();
-    const game = filteredPlayniteGames.value[playniteActiveIndex.value];
-    if (game) {
-      selectPlayniteGame(game);
-    }
+    const group = filteredLibraryGames.value[Math.max(0, gameActiveIndex.value)];
+    if (group?.entries[0]) selectLibraryGame(group.entries[0]);
   } else if (event.key === 'Escape') {
-    playnitePickerOpen.value = false;
-    playniteActiveIndex.value = -1;
+    gamePickerOpen.value = false;
+    gameActiveIndex.value = -1;
   }
 }
 
@@ -2151,10 +2657,12 @@ async function submit(): Promise<void> {
   if (!(await validate())) return;
   saving.value = true;
   try {
+    await selectedSteamArtworkRequest;
     const payload = buildPayload();
     await saveApp(payload);
     commitRtxHdrLiveState();
     await fetchApps().catch(() => []);
+    leavingAfterSave.value = true;
     await router.push({ name: 'library' });
   } catch (cause) {
     saveError.value = localizedError(cause, 'ui.application.errors.save');
@@ -2164,6 +2672,8 @@ async function submit(): Promise<void> {
 }
 
 async function cancel(): Promise<void> {
+  if (isDirty.value && !window.confirm(t('ui.settings.leave_warning'))) return;
+  leavingAfterSave.value = true;
   await restoreOriginalRtxHdrLiveOverrides();
   void router.push({ name: 'library' });
 }
@@ -2189,6 +2699,7 @@ async function confirmDelete(): Promise<void> {
     await deleteApp(form.uuid);
     await fetchApps().catch(() => []);
     deleteOpen.value = false;
+    leavingAfterSave.value = true;
     await router.push({ name: 'library' });
   } catch (cause) {
     deleteError.value = localizedError(cause, 'ui.application.errors.delete');
@@ -2362,36 +2873,37 @@ onBeforeUnmount(() => {
                 autocomplete="off"
                 required
                 :aria-autocomplete="isNew ? 'list' : undefined"
-                :aria-controls="isNew ? 'app-playnite-options' : undefined"
-                :aria-expanded="isNew ? playnitePickerOpen : undefined"
+                :aria-controls="isNew ? 'app-game-options' : undefined"
+                :aria-expanded="isNew ? gamePickerOpen : undefined"
                 :aria-activedescendant="
-                  isNew && playniteActiveIndex >= 0
-                    ? `app-playnite-option-${playniteActiveIndex}`
-                    : undefined
+                  isNew && gameActiveIndex >= 0 ? `app-game-option-${gameActiveIndex}` : undefined
                 "
                 :aria-invalid="Boolean(errors.name)"
                 :aria-describedby="errors.name ? 'app-name-error' : 'app-name-help'"
                 :readonly="isRemoteSession"
-                @focus="isNew && openPlaynitePicker()"
-                @blur="closePlaynitePicker"
+                @focus="isNew && openGamePicker()"
+                @blur="closeGamePicker"
                 @input="handleNameInput"
                 @keydown="handleNameKeydown"
               />
               <AppButton
-                v-if="isNew"
+                v-if="isNew && hasLibraryProvider"
                 size="compact"
                 icon="library"
-                :label="t('ui.application.playnite.browse')"
-                :aria-label="t('ui.application.playnite.browse')"
+                :label="t('ui.application.gamePicker.browse')"
                 @mousedown.prevent
-                @click="openPlaynitePicker"
+                @click="openGamePicker"
               />
             </div>
             <span id="app-name-help" class="vs-field__helper">
               {{
                 isPlayniteLinked
                   ? t('ui.application.playnite.linkedHelp')
-                  : t('ui.application.fields.name.help')
+                  : isSteamLinked
+                    ? t('ui.application.steam.linkedHelp')
+                    : isLutrisLinked
+                      ? t('ui.application.lutris.linkedHelp')
+                      : t('ui.application.fields.name.help')
               }}
             </span>
             <span v-if="errors.name" id="app-name-error" class="vs-field__error">{{
@@ -2399,46 +2911,69 @@ onBeforeUnmount(() => {
             }}</span>
 
             <div
-              v-if="isNew && playnitePickerOpen"
-              id="app-playnite-options"
+              v-if="isNew && gamePickerOpen"
+              id="app-game-options"
               class="editor-playnite-picker"
               role="listbox"
-              :aria-label="t('ui.application.playnite.resultsLabel')"
+              :aria-label="t('ui.application.gamePicker.resultsLabel')"
             >
-              <p v-if="playniteGamesLoading" class="editor-playnite-picker__notice">
-                {{ t('ui.application.playnite.loading') }}
+              <p v-if="libraryGamesLoading" class="editor-playnite-picker__notice">
+                {{ t('ui.application.gamePicker.loading') }}
               </p>
-              <p v-else-if="playniteGamesError" class="editor-playnite-picker__notice">
-                {{ playniteGamesError }}
+              <p
+                v-for="error in libraryGamesErrors"
+                :key="error"
+                class="editor-playnite-picker__notice"
+              >
+                {{ error }}
               </p>
-              <p v-else-if="playniteGamesUnavailable" class="editor-playnite-picker__notice">
-                {{ t('ui.application.playnite.unavailable') }}
+              <button
+                v-for="(group, index) in filteredLibraryGames"
+                :id="'app-game-option-' + index"
+                :key="group.key"
+                class="editor-playnite-option"
+                :class="{ 'editor-playnite-option--active': gameActiveIndex === index }"
+                type="button"
+                role="option"
+                :aria-selected="gameActiveIndex === index"
+                @mousedown.prevent
+                @click="selectLibraryGame(group.entries[0]!)"
+                @mouseenter="gameActiveIndex = index"
+              >
+                <UiIcon name="gamepad" :size="16" aria-hidden="true" />
+                <span>{{ group.name }}</span>
+                <span class="editor-steam-option__path">{{
+                  [...new Set(group.entries.map((entry) => providerLabels[entry.provider]))].join(
+                    ' · ',
+                  )
+                }}</span>
+              </button>
+              <p
+                v-if="!libraryGamesLoading && !filteredLibraryGames.length"
+                class="editor-playnite-picker__notice"
+              >
+                {{ t('ui.application.gamePicker.empty') }}
               </p>
-              <template v-else>
-                <button
-                  v-for="(game, index) in filteredPlayniteGames"
-                  :id="`app-playnite-option-${index}`"
-                  :key="game.id"
-                  class="editor-playnite-option"
-                  :class="{ 'editor-playnite-option--active': playniteActiveIndex === index }"
-                  type="button"
-                  role="option"
-                  :aria-selected="playniteActiveIndex === index"
-                  @mousedown.prevent
-                  @click="selectPlayniteGame(game)"
-                  @mouseenter="playniteActiveIndex = index"
-                >
-                  <UiIcon name="library" :size="16" aria-hidden="true" />
-                  <span>{{ game.name }}</span>
-                </button>
-                <p v-if="!filteredPlayniteGames.length" class="editor-playnite-picker__notice">
-                  {{ t('ui.application.playnite.empty') }}
-                </p>
-              </template>
             </div>
+            <label v-if="isNew && selectedLibraryAlternatives.length > 1" class="vs-field">
+              <span class="vs-field__label">{{ t('ui.application.gamePicker.library') }}</span>
+              <select class="vs-select" :value="selectedLibraryKey" @change="changeLibrary">
+                <option
+                  v-for="entry in selectedLibraryAlternatives"
+                  :key="entry.provider + ':' + entry.id"
+                  :value="entry.provider + ':' + entry.id"
+                >
+                  {{ providerLabels[entry.provider] }}
+                </option>
+              </select>
+            </label>
 
             <div v-if="isPlayniteLinked" class="editor-playnite-link vs-cluster">
-              <StatusBadge :label="t('apps.playnite_badge')" tone="info" compact />
+              <StatusBadge
+                :label="managedProviderLabel('Playnite', form.playniteManaged)"
+                :tone="form.playniteManaged === 'auto' ? 'success' : 'info'"
+                compact
+              />
               <span>{{ form.playniteId }}</span>
               <AppButton
                 v-if="isPlayniteLinked"
@@ -2446,6 +2981,35 @@ onBeforeUnmount(() => {
                 variant="tertiary"
                 icon="x"
                 :label="t('ui.application.playnite.useCustom')"
+                @click="useCustomApplication"
+              />
+            </div>
+            <div v-if="isSteamLinked" class="editor-playnite-link vs-cluster">
+              <StatusBadge
+                :label="managedProviderLabel('Steam', form.steamManaged)"
+                :tone="form.steamManaged === 'auto' ? 'success' : 'info'"
+                compact
+              />
+              <AppButton
+                size="compact"
+                variant="tertiary"
+                icon="x"
+                :label="t('ui.application.steam.useCustom')"
+                @click="useCustomApplication"
+              />
+            </div>
+            <div v-if="isLutrisLinked" class="editor-playnite-link vs-cluster">
+              <StatusBadge
+                :label="managedProviderLabel('Lutris', form.lutrisManaged)"
+                :tone="form.lutrisManaged === 'auto' ? 'success' : 'info'"
+                compact
+              />
+              <span>{{ form.lutrisId }}</span>
+              <AppButton
+                size="compact"
+                variant="tertiary"
+                icon="x"
+                :label="t('ui.application.lutris.useCustom')"
                 @click="useCustomApplication"
               />
             </div>
@@ -2513,7 +3077,7 @@ onBeforeUnmount(() => {
 
           <div class="editor-grid">
             <label
-              v-if="!isPlayniteLinked && !isRemoteSession"
+              v-if="!isProviderLinked && !isRemoteSession"
               class="vs-field editor-field editor-field--full"
               for="app-command"
             >
@@ -2536,7 +3100,11 @@ onBeforeUnmount(() => {
               </span>
             </label>
 
-            <label v-if="!isPlayniteLinked && !isRemoteSession" class="vs-field editor-field" for="app-working-dir">
+            <label
+              v-if="!isProviderLinked && !isRemoteSession"
+              class="vs-field editor-field"
+              for="app-working-dir"
+            >
               <span class="vs-field__label">{{ t('apps.working_dir') }}</span>
               <input
                 id="app-working-dir"
@@ -2547,15 +3115,15 @@ onBeforeUnmount(() => {
             </label>
 
             <div class="vs-field editor-field editor-field--full">
-              <label v-if="!isPlayniteLinked" class="vs-field__label" for="app-image-path">
+              <label v-if="!isProviderLinked" class="vs-field__label" for="app-image-path">
                 {{ t('ui.application.fields.imagePath.label') }}
               </label>
               <span v-else class="vs-field__label">
-                {{ t('ui.application.fields.imagePath.label') }}
+                {{ t('ui.application.coverPicker.title') }}
               </span>
               <div class="editor-cover-control">
                 <input
-                  v-if="!isPlayniteLinked"
+                  v-if="!isProviderLinked"
                   id="app-image-path"
                   v-model="form.imagePath"
                   class="vs-input vs-monospace"
@@ -2575,19 +3143,51 @@ onBeforeUnmount(() => {
                   t(
                     isPlayniteLinked
                       ? 'ui.application.coverPicker.playniteWarning'
-                      : 'ui.application.fields.imagePath.help',
+                      : isProviderLinked
+                        ? 'ui.application.coverPicker.providerHelp'
+                        : 'ui.application.fields.imagePath.help',
                   )
                 }}
               </span>
+              <details
+                v-if="isProviderLinked && !isPlayniteLinked"
+                class="editor-inline-disclosure"
+              >
+                <summary>{{ t('ui.application.coverPicker.pathDisclosure') }}</summary>
+                <input
+                  id="app-image-path"
+                  v-model="form.imagePath"
+                  class="vs-input vs-monospace"
+                  type="text"
+                  :aria-label="t('ui.application.fields.imagePath.label')"
+                  :placeholder="t('ui.application.fields.imagePath.placeholder')"
+                />
+              </details>
             </div>
 
             <InlineAlert
               v-if="isPlayniteLinked"
               class="editor-field editor-field--full"
               tone="info"
-              :title="t('apps.playnite_badge')"
+              :title="managedProviderLabel('Playnite', form.playniteManaged)"
             >
               {{ t('apps.playnite_edit_notice') }}
+            </InlineAlert>
+            <InlineAlert
+              v-if="isSteamLinked"
+              class="editor-field editor-field--full"
+              tone="info"
+              :title="managedProviderLabel('Steam', form.steamManaged)"
+            >
+              {{ t('ui.application.steam.editNotice') }}
+            </InlineAlert>
+            <InlineAlert
+              v-if="isLutrisLinked"
+              class="editor-field editor-field--full"
+              tone="info"
+              :title="managedProviderLabel('Lutris', form.lutrisManaged)"
+            >
+              {{ t('ui.application.lutris.editNotice') }}
             </InlineAlert>
           </div>
         </div>
@@ -2836,6 +3436,17 @@ onBeforeUnmount(() => {
           <p>{{ t('ui.application.sections.display.description') }}</p>
         </div>
         <div class="vs-settings-group">
+          <SettingRow
+            :label="t('config.prefer_10bit_sdr')"
+            :description="t('config.app_prefer_10bit_sdr_desc')"
+            control-id="app-prefer-10bit-sdr"
+          >
+            <select id="app-prefer-10bit-sdr" v-model="form.prefer10BitSdr" class="vs-select">
+              <option :value="null">{{ t('config.app_prefer_10bit_sdr_inherit') }}</option>
+              <option :value="true">{{ t('_common.enabled') }}</option>
+              <option :value="false">{{ t('_common.disabled') }}</option>
+            </select>
+          </SettingRow>
           <fieldset class="app-display-routing">
             <legend>{{ t('config.app_display_override_label') }}</legend>
             <p>{{ t('config.app_display_override_hint') }}</p>
@@ -2991,7 +3602,19 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="editor-section" aria-labelledby="commands-heading">
+      <AppCompatibilitySettings
+        v-if="!isRemoteSession && appCompatibility"
+        :key="form.uuid"
+        v-model="appCompatibility"
+        class="editor-section"
+        :platform="asString(overrideMetadata.platform)"
+      />
+
+      <details class="editor-section editor-section--disclosure" :open="!isProviderLinked">
+        <summary v-if="isProviderLinked" class="editor-section__summary">
+          <span>{{ t('ui.application.sections.commands.advancedTitle') }}</span>
+          <small>{{ t('ui.application.sections.commands.advancedDescription') }}</small>
+        </summary>
         <div class="editor-section__heading editor-section__heading--actions">
           <div>
             <h2 id="commands-heading">{{ t('ui.application.sections.commands.title') }}</h2>
@@ -3029,7 +3652,7 @@ onBeforeUnmount(() => {
                 type="text"
               />
             </label>
-            <label class="vs-checkbox prep-entry__elevated">
+            <label v-if="isWindowsHost" class="vs-checkbox prep-entry__elevated">
               <input v-model="entry.elevated" type="checkbox" />
               <span>{{ t('ui.application.prep.elevated') }}</span>
             </label>
@@ -3053,7 +3676,7 @@ onBeforeUnmount(() => {
           />
           <span class="vs-field__helper">{{ t('ui.application.fields.detached.help') }}</span>
         </label>
-      </section>
+      </details>
 
       <section class="editor-section" aria-labelledby="overrides-heading">
         <div class="editor-section__heading">
@@ -3278,7 +3901,11 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section v-if="!isNew && !isRemoteSession" class="editor-danger" aria-labelledby="danger-heading">
+      <section
+        v-if="!isNew && !isRemoteSession"
+        class="editor-danger"
+        aria-labelledby="danger-heading"
+      >
         <div>
           <h2 id="danger-heading">{{ t('ui.application.delete.sectionTitle') }}</h2>
           <p>{{ t('ui.application.delete.sectionDescription') }}</p>
@@ -3377,10 +4004,6 @@ onBeforeUnmount(() => {
   padding-block-end: calc(var(--vs-space-80) * 1.5);
 }
 
-.application-page :deep(.vs-page-header) {
-  padding-block-end: 0;
-}
-
 .editor-form,
 .editor-loading {
   gap: var(--vs-space-32);
@@ -3388,6 +4011,58 @@ onBeforeUnmount(() => {
 
 .editor-section {
   gap: var(--vs-space-12);
+}
+
+.editor-section--disclosure:not([open]) {
+  display: block;
+}
+
+.editor-section__summary,
+.editor-inline-disclosure summary {
+  cursor: pointer;
+}
+
+.editor-section__summary {
+  padding: var(--vs-space-16) var(--vs-space-20);
+  border: var(--vs-border-width) solid var(--vs-color-border-subtle);
+  border-radius: var(--vs-radius-card);
+  background: var(--vs-color-bg-surface);
+}
+
+.editor-section__summary span,
+.editor-section__summary small {
+  display: block;
+}
+
+.editor-section__summary span {
+  color: var(--vs-color-text-primary);
+  font-weight: var(--vs-type-weight-semibold);
+}
+
+.editor-section__summary small {
+  margin-block-start: var(--vs-space-4);
+  color: var(--vs-color-text-secondary);
+}
+
+.editor-inline-disclosure {
+  margin-block-start: var(--vs-space-4);
+}
+
+.editor-inline-disclosure summary {
+  color: var(--vs-color-text-secondary);
+  font-size: var(--vs-type-size-helper);
+  font-weight: var(--vs-type-weight-semibold);
+}
+
+.editor-inline-disclosure .vs-input {
+  inline-size: 100%;
+  margin-block-start: var(--vs-space-8);
+}
+
+.editor-section__summary:focus-visible,
+.editor-inline-disclosure summary:focus-visible {
+  outline: var(--vs-focus-width) solid var(--vs-color-focus);
+  outline-offset: var(--vs-focus-offset);
 }
 
 .app-display-routing {
@@ -3504,10 +4179,14 @@ onBeforeUnmount(() => {
 }
 
 .editor-name-control {
+  flex-wrap: wrap;
   gap: var(--vs-space-8);
 }
 
-.editor-name-control .vs-input,
+.editor-name-control .vs-input {
+  flex: 1 1 14rem;
+}
+
 .editor-cover-control .vs-input {
   min-inline-size: 0;
   flex: 1;
@@ -3548,6 +4227,15 @@ onBeforeUnmount(() => {
 .editor-playnite-option:hover,
 .editor-playnite-option--active {
   background: var(--vs-color-bg-subtle);
+}
+
+.editor-steam-option__path {
+  overflow: hidden;
+  margin-inline-start: auto;
+  color: var(--vs-color-text-tertiary);
+  font-size: var(--vs-type-size-metadata);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .editor-playnite-option:focus-visible {
@@ -4314,6 +5002,10 @@ onBeforeUnmount(() => {
   .editor-cover-control .vs-button,
   .framegen-health__heading .vs-button {
     align-self: flex-start;
+  }
+
+  .editor-name-control .vs-input {
+    flex-basis: auto;
   }
 
   .application-overrides__list :deep(.vs-setting-row__control),

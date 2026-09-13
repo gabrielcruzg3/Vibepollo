@@ -79,6 +79,7 @@ export interface AppForm {
   stateCmd: PrepCmd[];
   detached: string[];
   virtualScreen: boolean;
+  prefer10BitSdr: boolean | null;
   virtualDisplayMode: AppVirtualDisplayMode | null;
   virtualDisplayLayout: AppVirtualDisplayLayout | null;
   frameGenerationProvider: FrameGenerationProvider;
@@ -97,6 +98,7 @@ export interface AppForm {
   rtxHdrMiddleGray: number;
   rtxHdrContrast: number;
   rtxHdrSaturation: number;
+  providerFields?: Record<string, unknown>;
   playniteId?: string | undefined;
   playniteManaged?: 'manual' | string | undefined;
   ddConfigurationOption?:
@@ -136,6 +138,7 @@ export interface ServerApp {
   'prep-cmd'?: Array<{ do?: string; undo?: string; elevated?: boolean }>;
   detached?: string[];
   'virtual-screen'?: boolean;
+  'prefer-10bit-sdr'?: boolean;
   'playnite-id'?: string | undefined;
   'playnite-managed'?: 'manual' | string | undefined;
   'gen1-framegen-fix'?: boolean;

@@ -184,6 +184,9 @@ namespace rtsp_stream {
   std::shared_ptr<launch_session_t> make_startup_launch_session_snapshot(const launch_session_t &source) {
     auto snapshot = std::make_shared<launch_session_t>();
 
+    // This snapshot feeds stream::session::alloc, so carry the pending hold
+    // across the handoff to active capture without an uninhibited gap.
+    snapshot->display_power_guard = source.display_power_guard;
     snapshot->id = source.id;
     snapshot->role = source.role;
     snapshot->role_generation = source.role_generation;
@@ -1092,7 +1095,7 @@ namespace rtsp_stream {
     }
 
     void set_pending_vulkan_hdr_layer_stream(bool active) {
-      bool vulkan_hdr_layer_active = false;
+      [[maybe_unused]] bool vulkan_hdr_layer_active = false;
       {
         auto lg = _session_state.lock();
         _session_state->vulkan_hdr_layer_pending_stream = active;
@@ -1119,7 +1122,7 @@ namespace rtsp_stream {
       // but perform the potentially blocking join() outside of the lock to
       // avoid deadlocks. Each join serializes only its final ownership change.
       std::vector<std::shared_ptr<stream::session_t>> to_cleanup;
-      bool vulkan_hdr_layer_active = false;
+      [[maybe_unused]] bool vulkan_hdr_layer_active = false;
 
       {
         auto lg = _session_state.lock();
@@ -1160,7 +1163,7 @@ namespace rtsp_stream {
      * @param session The session to remove.
      */
     void remove(const std::shared_ptr<stream::session_t> &session) {
-      bool vulkan_hdr_layer_active = false;
+      [[maybe_unused]] bool vulkan_hdr_layer_active = false;
       {
         auto lg = _session_state.lock();
         _session_state->sessions.erase(session);
@@ -1179,7 +1182,7 @@ namespace rtsp_stream {
      */
     void insert(const std::shared_ptr<stream::session_t> &session, const std::string &client_uuid, bool hdr_enabled) {
       const bool has_uuid = !client_uuid.empty();
-      bool vulkan_hdr_layer_active = false;
+      [[maybe_unused]] bool vulkan_hdr_layer_active = false;
       {
         auto lg = _session_state.lock();
         _session_state->sessions.emplace(session);
@@ -1224,7 +1227,7 @@ namespace rtsp_stream {
       std::vector<std::shared_ptr<stream::session_t>> to_cleanup;
       bool removed_pending = false;
       client_disconnect_result_t result;
-      bool vulkan_hdr_layer_active = false;
+      [[maybe_unused]] bool vulkan_hdr_layer_active = false;
       {
         std::lock_guard lock {pending_launches_mutex};
         for (auto it = pending_launches.begin(); it != pending_launches.end();) {
@@ -1279,7 +1282,7 @@ namespace rtsp_stream {
     ) {
       std::vector<std::shared_ptr<stream::session_t>> to_cleanup;
       bool removed_pending = false;
-      bool vulkan_hdr_layer_active = false;
+      [[maybe_unused]] bool vulkan_hdr_layer_active = false;
       {
         std::lock_guard lock {pending_launches_mutex};
         for (auto it = pending_launches.begin(); it != pending_launches.end();) {
@@ -1840,7 +1843,17 @@ namespace rtsp_stream {
 
       config.monitor.height = (int) util::from_view(args.at("x-nv-video[0].clientViewportHt"sv));
       config.monitor.width = (int) util::from_view(args.at("x-nv-video[0].clientViewportWd"sv));
-      config.monitor.framerate = (int) util::from_view(args.at("x-nv-video[0].maxFPS"sv));
+      const auto requested_framerate = args.at("x-nv-video[0].maxFPS"sv);
+      const auto normalized_framerate = pending_policy::parse_requested_framerate(requested_framerate);
+      if (!normalized_framerate) {
+        BOOST_LOG(warning) << "Rejecting invalid client maxFPS ["sv << requested_framerate << "]"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.monitor.framerate = normalized_framerate->capture_framerate;
+      config.monitor.encodingFramerate = pending_policy::select_encoding_framerate(
+        *normalized_framerate, session->fps, config::video.limit_framerate
+      );
       config.monitor.framerateX100 = (int) util::from_view(args.at("x-nv-video[0].clientRefreshRateX100"sv));
       config.monitor.bitrate = (int) util::from_view(args.at("x-nv-vqos[0].bw.maximumBitrateKbps"sv));
       config.monitor.client_requested_bitrate = config.monitor.bitrate;
@@ -1852,18 +1865,6 @@ namespace rtsp_stream {
       config.monitor.chromaSamplingType = (int) util::from_view(args.at("x-ss-video[0].chromaSamplingType"sv));
       config.monitor.enableIntraRefresh = (int) util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
       config.monitor.vrr_low_latency = session->client_vrr_requested;
-
-      if (config.monitor.framerate > 1000) {
-        config.monitor.encodingFramerate = config.monitor.framerate;
-      } else {
-        config.monitor.encodingFramerate = config.monitor.framerate * 1000;
-      }
-
-      // When fractional refresh rate requested from client side, it should be well above 1000fps.
-      // 4000fps is when Warp2 Mode is enabled on the client, requested framerate can be actual * 4.
-      if (config.monitor.framerate > 4000) {
-        config.monitor.framerate = std::round((float) config.monitor.framerate / 1000);
-      }
 
       // Validate that clientRefreshRateX100 is consistent with maxFPS.
       // Some clients send a stale or incorrect clientRefreshRateX100 (e.g. 6000 = 60fps)
@@ -1952,35 +1953,15 @@ namespace rtsp_stream {
     }
     apply_rtx_hdr_stream_policy(config.monitor);
 
-    // If the client sent a configured bitrate, we will choose the actual bitrate ourselves
-    // by using FEC percentage and audio quality settings. If the calculated bitrate ends up
-    // too low, we'll allow it to exceed the limits rather than reducing the encoding bitrate
-    // down to nearly nothing.
-    if (configuredBitrateKbps) {
-      BOOST_LOG(debug) << "Client configured bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
-
-      // Preserve the original wire-bandwidth budget the client asked for so the
-      // UI can show it alongside the post-adjustment encoder bitrate.
-      config.monitor.client_requested_bitrate = static_cast<int>(configuredBitrateKbps);
-
-      // If the FEC percentage isn't too high, adjust the configured bitrate to ensure video
-      // traffic doesn't exceed the user's selected bitrate when the FEC shards are included.
-      if (config::stream.fec_percentage <= 80) {
-        configuredBitrateKbps /= 100.f / (100 - config::stream.fec_percentage);
-      }
-
-      // Adjust the bitrate to account for audio traffic bandwidth usage (capped at 20% reduction).
-      // The bitrate per channel is 256 Kbps for high quality mode and 96 Kbps for normal quality.
-      auto audioBitrateAdjustment = (config.audio.flags[audio::config_t::HIGH_QUALITY] ? 256 : 96) * config.audio.channels;
-      configuredBitrateKbps -= std::min((std::int64_t) audioBitrateAdjustment, configuredBitrateKbps / 5);
-
-      // Reduce it by another 500Kbps to account for A/V packet overhead and control data
-      // traffic (capped at 10% reduction).
-      configuredBitrateKbps -= std::min((std::int64_t) 500, configuredBitrateKbps / 10);
-
-      BOOST_LOG(debug) << "Final adjusted video encoding bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
-      config.monitor.bitrate = (int) configuredBitrateKbps;
-    }
+    const auto bitrate = pending_policy::negotiate_bitrate(
+      configuredBitrateKbps, config.monitor.bitrate, config::video.max_bitrate,
+      {config.monitor.framerate, config.monitor.encodingFramerate}, config::video.limit_framerate,
+      config::stream.fec_percentage, config.audio.channels, config.audio.flags[audio::config_t::HIGH_QUALITY]
+    );
+    config.monitor.client_requested_bitrate = bitrate.requested_kbps;
+    config.monitor.bitrate = bitrate.encoder_kbps;
+    BOOST_LOG(debug) << "Client requested bitrate is " << bitrate.requested_kbps
+                     << " Kbps; negotiated encoder bitrate is " << bitrate.encoder_kbps << " Kbps";
 
     if (config.monitor.videoFormat == 1 && video::active_hevc_mode == 1) {
       BOOST_LOG(warning) << "HEVC is disabled, yet the client requested HEVC"sv;

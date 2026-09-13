@@ -266,6 +266,12 @@ function selectVirtualDisplayLayout(v: unknown) {
     <PlatformLayout>
       <template #windows>
         <ConfigFieldRenderer
+          setting-key="audio_sink_capture_only"
+          v-model="config.audio_sink_capture_only"
+          class="mb-6"
+        />
+
+        <ConfigFieldRenderer
           setting-key="virtual_sink"
           v-model="config.virtual_sink"
           class="mb-6"
@@ -482,6 +488,21 @@ function selectVirtualDisplayLayout(v: unknown) {
                 </p>
               </div>
             </transition>
+
+            <div
+              class="mt-4 rounded-lg border border-dark/10 bg-surface/20 p-3 dark:border-light/10 sm:p-4"
+            >
+              <n-checkbox v-model:checked="config.remote_monitor_confirm_app_replacement">
+                <div class="flex flex-col">
+                  <span class="text-sm font-medium">
+                    {{ $t('config.remote_monitor_confirm_app_replacement') }}
+                  </span>
+                  <span class="mt-1 text-[11px] leading-snug opacity-70">
+                    {{ $t('config.remote_monitor_confirm_app_replacement_desc') }}
+                  </span>
+                </div>
+              </n-checkbox>
+            </div>
 
             <PlatformLayout>
               <template #windows>

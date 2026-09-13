@@ -114,7 +114,7 @@ const defaultGroups = [
       mouse: 'enabled',
       high_resolution_scrolling: 'enabled',
       native_pen_touch: 'enabled',
-      enable_input_only_mode: 'disabled',
+      enable_input_only_mode: 'enabled',
       forward_rumble: 'enabled',
       keybindings: '[0x10,0xA0,0x11,0xA2,0x12,0xA4]',
       ds5_inputtino_randomize_mac: true,
@@ -125,6 +125,7 @@ const defaultGroups = [
     name: 'Audio/Video',
     options: {
       audio_sink: '',
+      audio_sink_capture_only: 'disabled',
       virtual_sink: '',
       install_steam_audio_drivers: 'enabled',
       stream_audio: 'enabled',
@@ -139,6 +140,7 @@ const defaultGroups = [
       remote_monitor_disconnect_on_stream_end: false,
       remote_monitor_disconnect_on_client_disconnect: false,
       remote_monitor_terminate_on_first_request: false,
+      remote_monitor_confirm_app_replacement: true,
       dd_configuration_option: 'verify_only',
       dd_resolution_option: 'auto',
       dd_manual_resolution: '',
@@ -257,6 +259,7 @@ const defaultGroups = [
       frame_limiter_enable: false,
       frame_limiter_provider: 'auto',
       frame_limiter_fps_limit: 0,
+      mangohud_limiter_method: 'late',
       frame_limiter_auto_virtual_framegen: 'enabled',
       rtss_install_path: '',
       rtss_frame_limit_type: 'async',
@@ -615,6 +618,9 @@ export const useConfigStore = defineStore('config', () => {
       }
       if (!Object.prototype.hasOwnProperty.call(data, 'frame_limiter_provider')) {
         (data as Record<string, unknown>)['frame_limiter_provider'] = 'auto';
+      }
+      if (!Object.prototype.hasOwnProperty.call(data, 'mangohud_limiter_method')) {
+        (data as Record<string, unknown>)['mangohud_limiter_method'] = 'late';
       }
       const virtualCaptureKey = 'frame_limiter_auto_virtual_framegen';
       if (!Object.prototype.hasOwnProperty.call(data, virtualCaptureKey)) {

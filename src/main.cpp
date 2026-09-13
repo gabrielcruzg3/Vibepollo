@@ -5,9 +5,13 @@
 // standard includes
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <codecvt>
 #include <condition_variable>
 #include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -34,6 +38,10 @@
 #include "video.h"
 #include "session_history.h"
 #include "state_storage.h"
+#include "steam_auto_sync.h"
+#ifdef __linux__
+  #include "lutris_auto_sync.h"
+#endif
 #include "webrtc_stream.h"
 #ifdef _WIN32
   #include <shobjidl.h>
@@ -46,6 +54,13 @@
   #include "src/platform/windows/startup_encoder_probe_policy.h"
   #include "src/platform/windows/virtual_display.h"
   #include "src/platform/windows/virtual_display_cleanup.h"
+#elif defined(__linux__)
+  #include "src/platform/linux/capability_sanitizer.h"
+  #include "src/platform/linux/maintenance_cli.h"
+  #include "src/platform/linux/private_display.h"
+  #include "src/platform/linux/display_backend.h"
+
+  #include <pthread.h>
 #endif
 
 #ifdef _WIN32
@@ -62,12 +77,13 @@ extern "C" {
 
 using namespace std::literals;
 
+#ifndef __linux__
 std::map<int, std::function<void()>> signal_handlers;
 
-#ifdef _WIN32
-  #define WIDEN_STRING_LITERAL_IMPL(value) L##value
-  #define WIDEN_STRING_LITERAL(value) WIDEN_STRING_LITERAL_IMPL(value)
-#endif
+  #ifdef _WIN32
+    #define WIDEN_STRING_LITERAL_IMPL(value) L##value
+    #define WIDEN_STRING_LITERAL(value) WIDEN_STRING_LITERAL_IMPL(value)
+  #endif
 
 void on_signal_forwarder(int sig) {
   signal_handlers.at(sig)();
@@ -79,14 +95,23 @@ void on_signal(int sig, FN &&fn) {
 
   std::signal(sig, on_signal_forwarder);
 }
+#endif
 
 namespace {
   static_assert(std::atomic_bool::is_always_lock_free, "shutdown signal flag must be lock-free in a signal handler");
 
   class shutdown_deadline_t {
   public:
-    explicit shutdown_deadline_t(std::atomic_bool *signal_requested):
-        signal_requested_ {signal_requested} {
+    explicit shutdown_deadline_t(std::atomic_bool *signal_requested, bool supervised_machine_host):
+        signal_requested_ {signal_requested},
+        supervised_machine_host_ {supervised_machine_host} {
+      // The machine host runs under systemd with SendSIGKILL=no so that the
+      // display topology survives a stop. That makes this watchdog the only
+      // thing that can end a shutdown whose joins never return: without it a
+      // hung host outlives its unit, keeps the ports, and blocks every
+      // upgrade and restart until someone kills it by hand. The preserve
+      // request was already made when the signal arrived, so a forced exit
+      // after the deadline loses nothing that a graceful exit would keep.
       try {
         worker_ = std::jthread([this](std::stop_token) {
           run();
@@ -141,9 +166,9 @@ namespace {
     void run() {
       std::unique_lock lock {mutex_};
       while (state_ == state_e::idle && (!signal_requested_ || !signal_requested_->load(std::memory_order_relaxed))) {
-        // std::signal handlers cannot notify a condition variable safely. Poll
-        // the signal-safe flag so startup work is covered before main reaches
-        // shutdown_event->view().
+        // The Linux signal-wait thread may publish shutdown before main reaches
+        // shutdown_event->view(). Poll the flag so that early startup remains
+        // covered without doing lock-taking work in asynchronous signal context.
         cv_.wait_for(lock, std::chrono::milliseconds(50));
       }
       if (state_ == state_e::idle) {
@@ -153,8 +178,10 @@ namespace {
         return;
       }
 
-      constexpr auto kShutdownDeadline = std::chrono::seconds(10);
-      if (cv_.wait_until(lock, std::chrono::steady_clock::now() + kShutdownDeadline, [this] {
+      // The machine host's unit allows 20 seconds for a stop; leave a margin so
+      // the forced exit lands before systemd gives up on the unit.
+      const auto deadline = supervised_machine_host_ ? std::chrono::seconds(15) : std::chrono::seconds(10);
+      if (cv_.wait_until(lock, std::chrono::steady_clock::now() + deadline, [this] {
             return state_ != state_e::armed;
           })) {
         return;
@@ -164,7 +191,13 @@ namespace {
       // therefore cannot leave a stale timer behind to trap later.
       state_ = state_e::firing;
       lock.unlock();
-      BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
+      BOOST_LOG(fatal) << deadline.count() << " seconds passed, yet Vibepollo's still running: Forcing shutdown"sv;
+      if (supervised_machine_host_) {
+        // A trap would leave the process (and its ports) behind for systemd,
+        // which is exactly the orphan this deadline exists to prevent.
+        logging::log_flush();
+        std::_Exit(lifetime::desired_exit_code);
+      }
       lifetime::debug_trap();
     }
 
@@ -172,6 +205,7 @@ namespace {
     std::condition_variable cv_;
     state_e state_ {state_e::idle};
     std::atomic_bool *signal_requested_ = nullptr;
+    bool supervised_machine_host_ = false;
     std::jthread worker_;
   };
 }  // namespace
@@ -239,7 +273,60 @@ WINAPI BOOL ConsoleCtrlHandler(DWORD type) {
 #endif
 
 int main(int argc, char *argv[]) {
+#ifdef __linux__
+  #ifdef SUNSHINE_BUILD_STEAMOS
+  if (platf::linux_cli::command(argc, argv)) {
+    std::fputs("Vibepollo: native Linux maintenance commands are unavailable in the SteamOS user bundle.\n", stderr);
+    return 2;
+  }
+  #else
+  // Maintenance never enters host initialization. In particular, sudo must
+  // reach the root-owned administrative helper before the host-only capability
+  // policy rejects a root process. No configuration or logging is parsed here.
+  if (const auto result = platf::linux_cli::dispatch(argc, argv)) {
+    return *result;
+  }
+  #endif
+  if (!platf::linux_security::sanitize_startup_capabilities()) {
+    const int error_number = errno ? errno : EPERM;
+    std::fprintf(stderr, "Vibepollo: failed to sanitize Linux startup capabilities: %s\n",
+                 std::strerror(error_number));
+    return 1;
+  }
+  // Block termination before any worker or GPU resource can exist. Every
+  // subsequently created thread inherits this mask; one dedicated sigwait()
+  // thread consumes the signal synchronously in ordinary thread context.
+  sigset_t termination_signal_set;
+  sigemptyset(&termination_signal_set);
+  sigaddset(&termination_signal_set, SIGINT);
+  sigaddset(&termination_signal_set, SIGTERM);
+  if (const int error_number = pthread_sigmask(SIG_BLOCK, &termination_signal_set, nullptr); error_number != 0) {
+    std::fprintf(stderr, "Vibepollo: failed to block termination signals: %s\n", std::strerror(error_number));
+    return 1;
+  }
+  const char *machine_host_environment = std::getenv("VIBEPOLLO_MACHINE_HOST");
+  const bool supervised_machine_host =
+    machine_host_environment && machine_host_environment[0] == '1' &&
+    machine_host_environment[1] == '\0';
+#else
+  constexpr bool supervised_machine_host = false;
+#endif
+
   lifetime::argv = argv;
+
+#ifdef SUNSHINE_BUILD_STEAMOS
+  // Resolve assets from the executable's release, including launches outside
+  // the wrapper and upgrades which switch the "current" symlink underneath us.
+  std::error_code bundle_error;
+  const auto bundle_executable = std::filesystem::read_symlink("/proc/self/exe", bundle_error);
+  if (!bundle_error) {
+    std::filesystem::current_path(bundle_executable.parent_path().parent_path(), bundle_error);
+  }
+  if (bundle_error) {
+    std::fprintf(stderr, "Vibepollo: cannot resolve SteamOS bundle: %s\n", bundle_error.message().c_str());
+    return 1;
+  }
+#endif
 
 #ifdef _WIN32
   // Avoid searching the PATH in case a user has configured their system insecurely
@@ -344,7 +431,58 @@ int main(int argc, char *argv[]) {
   // to bound that join as well as the ordinary shutdown path below.
   auto shutdown_event = mail::man->event<bool>(mail::shutdown);
   std::atomic_bool shutdown_signal_requested {false};
-  shutdown_deadline_t shutdown_deadline {&shutdown_signal_requested};
+  shutdown_deadline_t shutdown_deadline {&shutdown_signal_requested, supervised_machine_host};
+
+#ifdef __linux__
+  std::atomic_bool termination_signal_monitor_stopping {false};
+  std::atomic_bool termination_signal_monitor_finished {false};
+  std::thread termination_signal_monitor;
+  try {
+    termination_signal_monitor = std::thread([&]() {
+      int signal_number = 0;
+      const int wait_error = sigwait(&termination_signal_set, &signal_number);
+      if (wait_error != 0) {
+        BOOST_LOG(error) << "Termination signal wait failed: " << std::strerror(wait_error);
+        shutdown_event->raise(true);
+        termination_signal_monitor_finished.store(true, std::memory_order_release);
+        return;
+      }
+      if (termination_signal_monitor_stopping.load(std::memory_order_acquire)) {
+        termination_signal_monitor_finished.store(true, std::memory_order_release);
+        return;
+      }
+      shutdown_signal_requested.store(true, std::memory_order_relaxed);
+      if (supervised_machine_host) {
+        platf::linux_private_display::request_process_shutdown_preserve();
+      }
+      BOOST_LOG(info) << (signal_number == SIGINT ? "Interrupt handler called"sv : "Terminate handler called"sv);
+      shutdown_event->raise(true);
+  #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+      if (config::sunshine.system_tray) {
+        system_tray::end_tray();
+      }
+  #endif
+      termination_signal_monitor_finished.store(true, std::memory_order_release);
+    });
+  } catch (const std::system_error &exception) {
+    BOOST_LOG(error) << "Unable to create the termination signal monitor: " << exception.what();
+    return 1;
+  }
+  auto stop_termination_signal_monitor = [&]() {
+    if (!termination_signal_monitor.joinable()) {
+      return;
+    }
+    termination_signal_monitor_stopping.store(true, std::memory_order_release);
+    if (!termination_signal_monitor_finished.load(std::memory_order_acquire)) {
+      const int wake_error = pthread_kill(termination_signal_monitor.native_handle(), SIGTERM);
+      if (wake_error != 0 && wake_error != ESRCH) {
+        BOOST_LOG(error) << "Unable to wake the termination signal monitor: " << std::strerror(wake_error);
+      }
+    }
+    termination_signal_monitor.join();
+  };
+  auto termination_signal_monitor_guard = util::fail_guard(stop_termination_signal_monitor);
+#endif
 
 #ifdef WIN32
   // Modify relevant NVIDIA control panel settings if the system has corresponding gpu
@@ -518,7 +656,9 @@ int main(int argc, char *argv[]) {
   }
 #endif
 
-  // Create signal handlers after logging has been initialized.
+#ifndef __linux__
+  // Other platforms retain their native signal/control handlers. Linux has
+  // blocked these signals process-wide and consumes them synchronously above.
   on_signal(SIGINT, [&shutdown_signal_requested, shutdown_event]() {
     shutdown_signal_requested.store(true, std::memory_order_relaxed);
     BOOST_LOG(info) << "Interrupt handler called"sv;
@@ -528,11 +668,11 @@ int main(int argc, char *argv[]) {
     proc::proc.terminate();
     // Break out of the main loop
     shutdown_event->raise(true);
-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+  #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
     if (config::sunshine.system_tray) {
       system_tray::end_tray();
     }
-#endif
+  #endif
   });
 
   on_signal(SIGTERM, [&shutdown_signal_requested, shutdown_event]() {
@@ -541,12 +681,13 @@ int main(int argc, char *argv[]) {
 
     // Break out of the main loop
     shutdown_event->raise(true);
-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+  #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
     if (config::sunshine.system_tray) {
       system_tray::end_tray();
     }
-#endif
+  #endif
   });
+#endif
 
 #ifdef _WIN32
   // Terminate gracefully on Windows when console window is closed
@@ -562,6 +703,31 @@ int main(int argc, char *argv[]) {
   if (!platf_deinit_guard) {
     BOOST_LOG(error) << "Platform failed to initialize"sv;
   }
+
+#ifdef __linux__
+  (void) platf::linux_display::backend().initialize();
+  auto linux_private_display_guard = util::fail_guard([supervised_machine_host]() {
+    if (supervised_machine_host) {
+      platf::linux_private_display::request_process_shutdown_preserve();
+      return;
+    }
+    (void) platf::linux_display::backend().revert();
+  });
+#endif
+
+  // Steam's catalog can change while the server is running. The watcher is
+  // started after logging/platform initialization and owns its shutdown
+  // thread independently of the task pool.
+  platf::steam::autosync::start();
+  auto steam_autosync_guard = util::fail_guard([]() {
+    platf::steam::autosync::stop();
+  });
+#ifdef __linux__
+  platf::lutris::autosync::start();
+  auto lutris_autosync_guard = util::fail_guard([]() {
+    platf::lutris::autosync::stop();
+  });
+#endif
 
 #ifdef _WIN32
   // Reconcile the Vulkan HDR implicit-layer registration with the configured preference. This makes
@@ -788,7 +954,10 @@ int main(int argc, char *argv[]) {
 
 #ifdef _WIN32
   // Start Playnite integration (IPC + handlers)
-  auto playnite_integration_guard = platf::playnite::start();
+  std::unique_ptr<platf::deinit_t> playnite_integration_guard;
+  if (config::playnite.enabled) {
+    playnite_integration_guard = platf::playnite::start();
+  }
 #endif
 
   std::thread configThread {confighttp::start};
@@ -843,8 +1012,15 @@ int main(int argc, char *argv[]) {
 
   // Wait for shutdown
   shutdown_event->view();
-  // Arm the owned watchdog from main so signal handlers never construct
-  // watchdog threads or queue watchdog work from signal context.
+#ifdef __linux__
+  if (supervised_machine_host) {
+    platf::linux_private_display::request_process_shutdown_preserve();
+  }
+  stop_termination_signal_monitor();
+  termination_signal_monitor_guard.disable();
+#endif
+  // The signal handler only wakes main; start the owned watchdog here so it
+  // never constructs threads or queues work from signal context.
   shutdown_deadline.arm();
 
 #ifdef WIN32
@@ -867,6 +1043,13 @@ int main(int argc, char *argv[]) {
   httpThread.join();
   configThread.join();
   rtspThread.join();
+
+#ifdef __linux__
+  platf::lutris::autosync::stop();
+  lutris_autosync_guard.disable();
+#endif
+  platf::steam::autosync::stop();
+  steam_autosync_guard.disable();
 
 #ifdef _WIN32
   // Full process shutdown cannot leave the paused-session watchdog running.

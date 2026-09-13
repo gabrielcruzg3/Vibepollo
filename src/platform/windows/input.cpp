@@ -539,9 +539,8 @@ namespace platf {
 
   /**
    * @brief Chooses which controller the VHF driver should present.
-   * @details An explicit `vhf_ds4`/`vhf_ds5` selection is honoured as-is. Plain `vhf` reuses the
-   *          same client-type and motion/touchpad rules that already drive DualShock 4 selection
-   *          on ViGEm, so a PlayStation client gets a PlayStation pad without extra configuration.
+   * @details Explicit profile selections are honoured as-is. Plain `vhf` matches PlayStation and
+   *          Nintendo client types before applying the motion/touchpad preferences to other pads.
    * @param metadata The client's reported gamepad capabilities.
    * @return The profile to request.
    */
@@ -564,6 +563,9 @@ namespace platf {
 
     if (metadata.type == LI_CTYPE_PS) {
       return vhf_profile_e::dualsense;
+    }
+    if (metadata.type == LI_CTYPE_NINTENDO) {
+      return vhf_profile_e::switch_pro;
     }
     if (config::input.motion_as_ds4 && (metadata.capabilities & (LI_CCAP_ACCEL | LI_CCAP_GYRO))) {
       return vhf_profile_e::dualsense;
@@ -660,10 +662,11 @@ namespace platf {
       // MOUSEEVENTF_VIRTUALDESK maps to the entirety of the desktop rather than the primary desktop
       MOUSEEVENTF_VIRTUALDESK;
 
-    // Note: x and y already include the display offset (offset_x/offset_y) from client_to_touchport(),
-    // so we must not add offset_x/offset_y again here to avoid double-offsetting on multi-monitor setups.
-    auto scaled_x = std::lround(x * ((float) target_touch_port.width / (float) touch_port.width));
-    auto scaled_y = std::lround(y * ((float) target_touch_port.height / (float) touch_port.height));
+    // Windows client_to_touchport() returns monitor-local coordinates. Add the
+    // capture offset, already relative to the virtual desktop origin, once before
+    // normalizing to the complete desktop used by MOUSEEVENTF_VIRTUALDESK.
+    auto scaled_x = std::lround((x + touch_port.offset_x) * ((float) target_touch_port.width / (float) touch_port.width));
+    auto scaled_y = std::lround((y + touch_port.offset_y) * ((float) target_touch_port.height / (float) touch_port.height));
 
     mi.dx = scaled_x;
     mi.dy = scaled_y;

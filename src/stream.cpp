@@ -22,6 +22,7 @@
 #include <system_error>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 
 // lib includes
 #include <boost/algorithm/string/predicate.hpp>
@@ -66,6 +67,10 @@ extern "C" {
   #include "platform/windows/misc.h"
   #include "platform/windows/virtual_display.h"
   #include "platform/windows/virtual_display_cleanup.h"
+#elif defined(__linux__)
+  #include "drm_timing_trace.h"
+  #include "platform/linux/private_display.h"
+  #include "src/platform/linux/display_backend.h"
 #endif
 
 #define IDX_START_A 0
@@ -284,6 +289,8 @@ namespace stream {
   void cancel_paused_display_cleanup() {
 #ifdef _WIN32
     g_paused_display_cleanup_generation.fetch_add(1, std::memory_order_acq_rel);
+#elif defined(__linux__)
+    platf::linux_display::backend().cancel_scheduled_revert();
 #endif
   }
 
@@ -550,6 +557,7 @@ namespace stream {
   };
 
   struct session_t {
+    std::shared_ptr<void> display_power_guard;
     config_t config;
     int stream_fps = 0;
     int stream_fps_scaled = 0;
@@ -1644,15 +1652,43 @@ namespace stream {
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     constexpr auto pending_peer_termination_grace = std::chrono::seconds(1);
     std::optional<std::chrono::steady_clock::time_point> process_terminated_since;
+
+    // Reuse the normal graceful termination packet when an ended game must be
+    // removed without taking down processless Remote Input/Monitor peers that
+    // share this control server.
+    std::uint32_t termination_reason = 0x80030023;
+    control_terminate_t termination_plaintext;
+    termination_plaintext.header.type = packetTypes[IDX_TERMINATION];
+    termination_plaintext.header.payloadLength = sizeof(termination_plaintext.ec);
+    termination_plaintext.ec = util::endian::big<uint32_t>(termination_reason);
+    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(termination_plaintext)) + crypto::cipher::tag_size>
+      termination_encrypted_payload;
+    auto send_termination = [&](session_t *session) {
+      if (!session->control.peer) {
+        return;
+      }
+      auto payload = encode_control(session, util::view(termination_plaintext), termination_encrypted_payload);
+      if (server->send(payload, session->control.peer)) {
+        TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
+        BOOST_LOG(warning) << "Couldn't send termination code to ["sv << addr << ':' << port << ']';
+      }
+    };
+
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
-      const bool process_running = proc::proc.running() != 0;
-      bool has_live_session = false;
+      // running() performs synchronous process cleanup when it observes an
+      // exited app. current_app_id() then gives the logical lifetime without
+      // mistaking lifecycle-gate contention for a terminal app exit.
+      (void) proc::proc.running();
+      const bool launch_or_startup_pending = rtsp_stream::has_pending_launch_or_startup();
+      const bool game_runtime_active = proc::proc.current_app_id() > 0 || launch_or_startup_pending;
+      bool has_processless_live_session = false;
+      bool has_game_session_pending_or_draining = false;
 
       {
         auto lg = server->_sessions.lock();
 
         auto now = std::chrono::steady_clock::now();
-        if (process_running) {
+        if (game_runtime_active) {
           process_terminated_since.reset();
         } else if (!process_terminated_since) {
           process_terminated_since = now;
@@ -1704,21 +1740,43 @@ namespace stream {
             continue;
           }
 
-          has_live_session = true;
+          const bool game_session_requires_shutdown =
+            rtsp_stream::pending_policy::game_session_requires_shutdown(
+              game_runtime_active,
+              session->remote_role
+            );
 
           // Remember if we have a session that's waiting for a peer to connect to the
           // control stream. This ensures the clients are properly notified even when
           // the app terminates before they finish connecting.
           if (!session->control.peer) {
-            if (!process_running && process_terminated_since &&
+            if (game_session_requires_shutdown && process_terminated_since &&
                 now - *process_terminated_since >= pending_peer_termination_grace) {
               BOOST_LOG(info) << "Stopping pending control session from ["sv << session->control.expected_peer_address
                               << "] because the app terminated before the peer connected."sv;
               session::stop(*session);
+              has_game_session_pending_or_draining = true;
               ++pos;
               continue;
             }
+            if (session->remote_role == remote_session::role_e::game) {
+              has_game_session_pending_or_draining = true;
+            } else {
+              has_processless_live_session = true;
+            }
           } else {
+            if (game_session_requires_shutdown) {
+              BOOST_LOG(info) << "Stopping game control session because the app terminated."sv;
+              send_termination(session);
+              session::stop(*session);
+              has_game_session_pending_or_draining = true;
+              ++pos;
+              continue;
+            }
+
+            if (session->remote_role != remote_session::role_e::game) {
+              has_processless_live_session = true;
+            }
             auto &feedback_queue = session->control.feedback_queue;
             while (feedback_queue->peek()) {
               auto feedback_msg = feedback_queue->pop();
@@ -1748,11 +1806,10 @@ namespace stream {
       // Remote Input and Remote Monitor deliberately have no configured app
       // process. Keep the shared control server alive across both the gap
       // before RTSP publishes the session and the complete live transport.
-      const bool launch_or_startup_pending = rtsp_stream::has_pending_launch_or_startup();
       if (!rtsp_stream::pending_policy::control_server_should_remain_alive(
-            process_running,
-            has_live_session,
-            launch_or_startup_pending
+            game_runtime_active,
+            has_processless_live_session,
+            has_game_session_pending_or_draining
           )) {
         BOOST_LOG(info) << "Process terminated"sv;
         break;
@@ -1763,29 +1820,12 @@ namespace stream {
 
     // Let all remaining connections know the server is shutting down
     // reason: graceful termination
-    std::uint32_t reason = 0x80030023;
-
-    control_terminate_t plaintext;
-    plaintext.header.type = packetTypes[IDX_TERMINATION];
-    plaintext.header.payloadLength = sizeof(plaintext.ec);
-    plaintext.ec = util::endian::big<uint32_t>(reason);
-
-    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
-      encrypted_payload;
-
     auto lg = server->_sessions.lock();
     for (auto pos = std::begin(*server->_sessions); pos != std::end(*server->_sessions); ++pos) {
       auto session = *pos;
 
-      // We may not have gotten far enough to have an ENet connection yet
-      if (session->control.peer) {
-        auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
-
-        if (server->send(payload, session->control.peer)) {
-          TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
-          BOOST_LOG(warning) << "Couldn't send termination code to ["sv << addr << ':' << port << ']';
-        }
-      }
+      // We may not have gotten far enough to have an ENet connection yet.
+      send_termination(session);
 
       session->shutdown_event->raise(true);
       session->controlEnd.raise(true);
@@ -1926,6 +1966,23 @@ namespace stream {
     auto ratecontrol_next_frame_start = std::chrono::steady_clock::now();
     std::optional<std::chrono::steady_clock::time_point> last_frame_timestamp;
 
+    struct wire_timeline_frame_t {
+      int64_t frame_index;
+      uint32_t rtp_timestamp;
+      std::chrono::steady_clock::time_point source_timestamp;
+      std::optional<std::chrono::steady_clock::time_point> host_processing_timestamp;
+      std::chrono::steady_clock::time_point packet_enqueue_timestamp;
+      std::chrono::steady_clock::time_point packet_pop_timestamp;
+      std::chrono::steady_clock::time_point send_complete_timestamp;
+    };
+    struct wire_timeline_state_t {
+      std::optional<wire_timeline_frame_t> previous_frame;
+      std::chrono::steady_clock::time_point window_started;
+      unsigned lines = 0;
+      unsigned suppressed = 0;
+    };
+    std::unordered_map<session_t *, wire_timeline_state_t> wire_timeline_by_session;
+
     while (auto packet = packets->pop()) {
       if (shutdown_event->peek()) {
         break;
@@ -1938,6 +1995,19 @@ namespace stream {
         continue;
       }
       const auto packet_pop_timestamp = std::chrono::steady_clock::now();
+      auto wire_state_it = wire_timeline_by_session.find(session);
+      if (wire_state_it == wire_timeline_by_session.end()) {
+        // Bound diagnostic state even if many sessions are created during one
+        // long-lived broadcast-thread generation.
+        if (wire_timeline_by_session.size() >= 16) {
+          wire_timeline_by_session.erase(wire_timeline_by_session.begin());
+        }
+        wire_state_it = wire_timeline_by_session.emplace(
+          session,
+          wire_timeline_state_t {.window_started = packet_pop_timestamp}
+        ).first;
+      }
+      auto &wire_timeline_state = wire_state_it->second;
       packet_queue_latency_logger.collect_and_log(std::chrono::duration<double, std::milli>(packet_pop_timestamp - packet->packet_enqueue_timestamp).count());
       if (packet->frame_timestamp) {
         if (last_frame_timestamp) {
@@ -2107,6 +2177,18 @@ namespace stream {
         size_t ratecontrol_frame_packets_sent = 0;
         size_t ratecontrol_group_packets_sent = 0;
 
+        // RTP uses the paced presentation timestamp, while the remaining
+        // timeline points below use actual host processing/send times. Keeping
+        // both lets a client trace distinguish a source gap from a frame held
+        // after capture.
+        bool frame_is_dupe = false;
+        if (!packet->frame_timestamp) {
+          packet->frame_timestamp = ratecontrol_next_frame_start;
+          frame_is_dupe = true;
+        }
+        using rtp_tick = std::chrono::duration<uint32_t, std::ratio<1, 90000>>;
+        const uint32_t timestamp = std::chrono::round<rtp_tick>(*packet->frame_timestamp - video_epoch).count();
+
         auto blockIndex = 0;
         std::for_each(fec_blocks_begin, fec_blocks_end, [&](std::string_view &current_payload) {
           auto packets = (current_payload.size() + (blocksize - 1)) / blocksize;
@@ -2150,17 +2232,6 @@ namespace stream {
           };
 
           size_t next_shard_to_send = 0;
-
-          // RTP video timestamps use a 90 KHz clock and the paced/scheduled frame timestamp.
-          // Raw capture timing is tracked separately for frame_processing_latency.
-          // When a timestamp isn't available (duplicate frames), the timestamp from rate control is used instead.
-          bool frame_is_dupe = false;
-          if (!packet->frame_timestamp) {
-            packet->frame_timestamp = ratecontrol_next_frame_start;
-            frame_is_dupe = true;
-          }
-          using rtp_tick = std::chrono::duration<uint32_t, std::ratio<1, 90000>>;
-          uint32_t timestamp = std::chrono::round<rtp_tick>(*packet->frame_timestamp - video_epoch).count();
 
           // set FEC info now that we know for sure what our percentage will be for this frame
           for (auto x = 0; x < shards.size(); ++x) {
@@ -2274,6 +2345,138 @@ namespace stream {
         });
 
         session->video.lowseq = lowseq;
+
+        const auto send_complete_timestamp = std::chrono::steady_clock::now();
+#ifdef __linux__
+        {
+          const auto timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      packet->frame_timestamp->time_since_epoch()
+          ).count();
+          const auto send_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 send_complete_timestamp.time_since_epoch()
+          ).count();
+          const auto wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch()
+          ).count();
+          if (frame_is_dupe) {
+            drm_timing_trace::write([&](auto &trace) {
+              trace << "kind=rtp frame=" << packet->frame_index()
+                    << " timestamp_source=synthetic"
+                    << " synthetic_ns=" << timestamp_ns
+                    << " rtp=" << timestamp
+                    << " send_ns=" << send_ns
+                    << " wall_ns=" << wall_ns;
+            });
+          } else if (wire_timeline_state.previous_frame) {
+            drm_timing_trace::write([&](auto &trace) {
+              trace << "kind=rtp frame=" << packet->frame_index()
+                    << " timestamp_source=drm"
+                    << " raw_ns=" << timestamp_ns
+                    << " rtp=" << timestamp
+                    << " previous_rtp=" << wire_timeline_state.previous_frame->rtp_timestamp
+                    << " delta=" << static_cast<std::uint32_t>(timestamp - wire_timeline_state.previous_frame->rtp_timestamp)
+                    << " send_ns=" << send_ns
+                    << " wall_ns=" << wall_ns;
+            });
+          } else {
+            drm_timing_trace::write([&](auto &trace) {
+              trace << "kind=rtp frame=" << packet->frame_index()
+                    << " timestamp_source=drm"
+                    << " raw_ns=" << timestamp_ns
+                    << " rtp=" << timestamp
+                    << " previous_rtp=none"
+                    << " delta=none"
+                    << " send_ns=" << send_ns
+                    << " wall_ns=" << wall_ns;
+            });
+          }
+        }
+#endif
+        if (!frame_is_dupe) {
+          const wire_timeline_frame_t current_wire_frame {
+            .frame_index = packet->frame_index(),
+            .rtp_timestamp = timestamp,
+            .source_timestamp = *packet->frame_timestamp,
+            .host_processing_timestamp = packet->host_processing_timestamp,
+            .packet_enqueue_timestamp = packet->packet_enqueue_timestamp,
+            .packet_pop_timestamp = packet_pop_timestamp,
+            .send_complete_timestamp = send_complete_timestamp,
+          };
+
+          // A reused session address or a restarted frame sequence must not be
+          // joined to stale state from an older stream.
+          if (wire_timeline_state.previous_frame &&
+              current_wire_frame.frame_index <= wire_timeline_state.previous_frame->frame_index) {
+            wire_timeline_state = wire_timeline_state_t {.window_started = send_complete_timestamp};
+          }
+
+          if (wire_timeline_state.previous_frame) {
+            const auto &previous_wire_frame = *wire_timeline_state.previous_frame;
+            const auto source_gap = current_wire_frame.source_timestamp - previous_wire_frame.source_timestamp;
+            if (source_gap >= 40ms) {
+              if (send_complete_timestamp - wire_timeline_state.window_started >= 10s) {
+                if (wire_timeline_state.suppressed != 0) {
+                  BOOST_LOG(debug) << "Host video gap timeline: suppressed="sv << wire_timeline_state.suppressed
+                                   << " events in the previous rate-limit window"sv;
+                }
+                wire_timeline_state.window_started = send_complete_timestamp;
+                wire_timeline_state.lines = 0;
+                wire_timeline_state.suppressed = 0;
+              }
+
+              if (wire_timeline_state.lines < 8) {
+                const auto elapsed_ms = [](auto end, auto start) {
+                  return std::chrono::duration<double, std::milli>(end - start).count();
+                };
+                const auto host_age_ms = [&](const wire_timeline_frame_t &frame) {
+                  return frame.host_processing_timestamp ?
+                           elapsed_ms(frame.packet_enqueue_timestamp, *frame.host_processing_timestamp) :
+                           -1.0;
+                };
+                BOOST_LOG(debug)
+                  << "Host video gap timeline: source_gap="sv << elapsed_ms(
+                       current_wire_frame.source_timestamp,
+                       previous_wire_frame.source_timestamp
+                     )
+                  << "ms prev={frame="sv << previous_wire_frame.frame_index
+                  << ",rtp="sv << previous_wire_frame.rtp_timestamp
+                  << ",source_to_enqueue="sv << elapsed_ms(
+                       previous_wire_frame.packet_enqueue_timestamp,
+                       previous_wire_frame.source_timestamp
+                     )
+                  << "ms,host_to_enqueue="sv << host_age_ms(previous_wire_frame)
+                  << "ms,queue="sv << elapsed_ms(
+                       previous_wire_frame.packet_pop_timestamp,
+                       previous_wire_frame.packet_enqueue_timestamp
+                     )
+                  << "ms,pop_to_send="sv << elapsed_ms(
+                       previous_wire_frame.send_complete_timestamp,
+                       previous_wire_frame.packet_pop_timestamp
+                     )
+                  << "ms} curr={frame="sv << current_wire_frame.frame_index
+                  << ",rtp="sv << current_wire_frame.rtp_timestamp
+                  << ",source_to_enqueue="sv << elapsed_ms(
+                       current_wire_frame.packet_enqueue_timestamp,
+                       current_wire_frame.source_timestamp
+                     )
+                  << "ms,host_to_enqueue="sv << host_age_ms(current_wire_frame)
+                  << "ms,queue="sv << elapsed_ms(
+                       current_wire_frame.packet_pop_timestamp,
+                       current_wire_frame.packet_enqueue_timestamp
+                     )
+                  << "ms,pop_to_send="sv << elapsed_ms(
+                       current_wire_frame.send_complete_timestamp,
+                       current_wire_frame.packet_pop_timestamp
+                     )
+                  << "ms}"sv;
+                ++wire_timeline_state.lines;
+              } else {
+                ++wire_timeline_state.suppressed;
+              }
+            }
+          }
+          wire_timeline_state.previous_frame = current_wire_frame;
+        }
 
         // Update per-session performance counters
         session->stats.frames_sent.fetch_add(1, std::memory_order_relaxed);
@@ -2808,6 +3011,26 @@ namespace stream {
 
       VDISPLAY::restorePhysicalHdrProfiles();
       platf::rtss_set_sync_limiter_override(std::nullopt);
+#elif defined(__linux__)
+      if (delay_virtual_display_cleanup_due_to_pause) {
+        BOOST_LOG(info) << "Linux private display: stream paused; scheduling output restore in "
+                        << paused_timeout_secs << "s.";
+        platf::linux_display::backend().schedule_revert(
+          std::chrono::seconds(paused_timeout_secs),
+          "paused-session timeout"
+        );
+      } else if (keep_virtual_display_due_to_pause) {
+        BOOST_LOG(debug) << "Linux private display: keeping the private output active for resume.";
+      } else {
+        if (config::video.dd.config_revert_delay.count() > 0) {
+          platf::linux_display::backend().schedule_revert(
+            config::video.dd.config_revert_delay,
+            "stream-end delay"
+          );
+        } else {
+          (void) platf::linux_display::backend().revert();
+        }
+      }
 #else
       if (display_restore_requested) {
         (void) display_helper_integration::revert();
@@ -2982,6 +3205,26 @@ namespace stream {
         lifecycle_lock.lock();
       }
 
+      // Client cleanup belongs to every disconnected transport, even while
+      // another client keeps the shared application running. Snapshot its
+      // environment before pause/finalization can change the process state.
+      if (!session.undo_cmds.empty()) {
+        auto exec_thread = std::thread([cmd_list = session.undo_cmds, env = proc::proc.get_env()]() mutable {
+          for (auto &cmd : cmd_list) {
+            std::error_code ec;
+            boost::filesystem::path working_dir = proc::find_working_directory(cmd.cmd, env);
+            auto child = platf::run_command(cmd.elevated, true, cmd.cmd, working_dir, env, nullptr, ec, nullptr);
+            BOOST_LOG(info) << "Spawning client undo command ["sv << cmd.cmd << "] in ["sv << working_dir << ']';
+            if (ec) {
+              BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd.cmd << "]: System: "sv << ec.message();
+            } else {
+              child.detach();
+            }
+          }
+        });
+        exec_thread.detach();
+      }
+
       if (session.remote_role == remote_session::role_e::monitor && !session.device_uuid.empty()) {
         const bool client_disconnected = session.client_disconnected.load(std::memory_order_acquire);
         if (remote_session::disconnect_monitor_after_stream(
@@ -3049,6 +3292,7 @@ namespace stream {
           session::finalize_shared_runtime_if_idle("rtsp_session_end", finalize_context);
       }
 
+      session.display_power_guard.reset();
       BOOST_LOG(info) << "Session ended"sv;
 
       // Record session end in persistent history (fires exactly once, after join)
@@ -3252,6 +3496,7 @@ namespace stream {
 
       session->shutdown_event = mail->event<bool>(mail::shutdown);
       session->launch_session_id = launch_session.id;
+      session->display_power_guard = launch_session.display_power_guard;
       session->device_name = launch_session.device_name;
       session->device_uuid = !launch_session.client_uuid.empty() ? launch_session.client_uuid : launch_session.unique_id;
       // Fresh history identifier per stream so each start/stop cycle produces

@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include <string_view>
+
 namespace nvenc {
 
   enum class nvenc_two_pass {
@@ -18,6 +20,29 @@ namespace nvenc {
     disabled,  ///< Disable split-frame encoding even when it would otherwise be auto-enabled
   };
   using split_encode_mode = split_encode_mode_e;
+
+  struct encoder_selection_policy_t {
+    bool include_native = true;
+    bool fail_closed = false;
+  };
+
+  inline constexpr std::string_view canonical_encoder_name(
+    std::string_view requested_encoder) noexcept {
+    if (requested_encoder == "nvenc_experimental") {
+      return "nvenc";
+    }
+    return requested_encoder;
+  }
+
+  /** Native Linux NVENC is preferred unless the legacy backend is requested. */
+  inline constexpr encoder_selection_policy_t encoder_selection_policy(
+    std::string_view requested_encoder) noexcept {
+    const auto canonical_encoder = canonical_encoder_name(requested_encoder);
+    return {
+      canonical_encoder != "nvenc_legacy",
+      canonical_encoder == "nvenc",
+    };
+  }
 
   /**
    * @brief NVENC encoder configuration.

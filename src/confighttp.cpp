@@ -73,6 +73,10 @@
 
 #ifdef _WIN32
   #include "platform/windows/virtual_display_cleanup.h"
+#elif defined(__linux__)
+  #include "platform/linux/capture_status.h"
+  #include "platform/linux/private_display.h"
+  #include "src/platform/linux/display_backend.h"
 #endif
 
 #include <nlohmann/json.hpp>
@@ -181,10 +185,11 @@ namespace confighttp {
       }
 
       const auto default_image = std::string {"remote-session/"} + std::string {*artwork};
+      const auto configured_name = control == remote_session::control_e::input ? "Remote Input" : "Remote Monitor";
       const auto index = find_app_index_by_uuid(file_tree["apps"], synthetic.uuid);
       if (!index) {
         file_tree["apps"].push_back({
-          {"name", synthetic.title},
+          {"name", configured_name},
           {"uuid", synthetic.uuid},
           {"image-path", default_image},
         });
@@ -193,8 +198,8 @@ namespace confighttp {
       }
 
       auto &app = file_tree["apps"][*index];
-      if (app.value("name", std::string {}) != synthetic.title) {
-        app["name"] = synthetic.title;
+      if (app.value("name", std::string {}) != configured_name) {
+        app["name"] = configured_name;
         changed = true;
       }
       if (!app.contains("image-path") || !app["image-path"].is_string() || app["image-path"].get<std::string>().empty()) {
@@ -224,7 +229,13 @@ namespace confighttp {
     return std::nullopt;
   }
 
+  std::recursive_mutex &apps_file_mutex() {
+    static std::recursive_mutex mutex;
+    return mutex;
+  }
+
   bool refresh_client_apps_cache(nlohmann::json &file_tree, bool sort_by_name) {
+    std::lock_guard lock {apps_file_mutex()};
     try {
       if (sort_by_name) {
         sort_apps_by_name(file_tree);
@@ -268,6 +279,7 @@ namespace confighttp {
     }
 
     try {
+      std::lock_guard apps_lock {apps_file_mutex()};
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json file_tree = nlohmann::json::parse(content);
       if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
@@ -458,12 +470,14 @@ namespace confighttp {
              key == "rtx_hdr_peak_brightness";
     }
 
+#ifdef _WIN32
     std::string encode_config_override_value(const nlohmann::json &value) {
       if (value.is_string()) {
         return value.get<std::string>();
       }
       return value.dump();
     }
+#endif
 
     void normalize_adapter_config_pair(nlohmann::json &config_object) {
       if (!config_object.is_object()) {
@@ -520,6 +534,10 @@ namespace confighttp {
 
       for (const auto &key : keys) {
         if (key.rfind("playnite_", 0) == 0) {
+          continue;
+        }
+
+        if (key.rfind("steam_", 0) == 0) {
           continue;
         }
 
@@ -580,6 +598,23 @@ namespace confighttp {
   // Forward declaration for error helper implemented later
   void bad_request(resp_https_t response, req_https_t request, const std::string &error_message);
   void getAppCover(resp_https_t response, req_https_t request);
+
+#if defined(_WIN32) || defined(__linux__)
+  // Platform-neutral frame limiter status (RTSS/NVCP on Windows, MangoHUD on Linux).
+  void getFrameLimiterStatus(resp_https_t response, req_https_t request);
+#endif
+
+  void getSteamStatus(resp_https_t response, req_https_t request);
+  void getSteamGames(resp_https_t response, req_https_t request);
+  void postSteamForceSync(resp_https_t response, req_https_t request);
+  void postSteamLaunch(resp_https_t response, req_https_t request);
+
+#ifdef __linux__
+  void getLutrisStatus(resp_https_t response, req_https_t request);
+  void getLutrisGames(resp_https_t response, req_https_t request);
+  void postLutrisForceSync(resp_https_t response, req_https_t request);
+  void postLutrisLaunch(resp_https_t response, req_https_t request);
+#endif
 
 #ifdef _WIN32
   // Forward declarations for Playnite handlers implemented in confighttp_playnite.cpp
@@ -1710,6 +1745,7 @@ namespace confighttp {
     print_req(request);
 
     try {
+      std::lock_guard apps_lock {apps_file_mutex()};
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json file_tree = nlohmann::json::parse(content);
 
@@ -1733,6 +1769,7 @@ namespace confighttp {
         "allow-client-commands",
         "use-app-identity",
         "per-client-app-identity",
+        "prefer-10bit-sdr",
         "gen1-framegen-fix",
         "gen2-framegen-fix",
         "dlss-framegen-capture-fix",  // backward compatibility
@@ -1957,6 +1994,7 @@ namespace confighttp {
 
     BOOST_LOG(info) << config::stream.file_apps;
     try {
+      std::lock_guard apps_lock {apps_file_mutex()};
       // TODO: Input Validation
 
       // Read the input JSON from the request body.
@@ -2457,6 +2495,7 @@ namespace confighttp {
 
     std::optional<size_t> target_index = index_from_body ? index_from_body : index_from_path;
 
+#ifdef _WIN32
     // Detect if the app being removed is the Playnite fullscreen launcher
     auto is_playnite_fullscreen = [](const nlohmann::json &app) -> bool {
       try {
@@ -2475,6 +2514,7 @@ namespace confighttp {
       } catch (...) {}
       return false;
     };
+#endif
 
     try {
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
@@ -2611,7 +2651,12 @@ namespace confighttp {
       for (const auto &device : devices) {
         const auto id = device.value("device_id", "");
         const auto label = device.value("friendly_name", device.value("display_name", id));
-        if (id.empty() || boost::algorithm::icontains(label, "virtual display")) continue;
+        if (id.empty()) continue;
+#ifdef __linux__
+        if (platf::linux_private_display::is_private_output(id)) continue;
+#else
+        if (boost::algorithm::icontains(label, "virtual display")) continue;
+#endif
         remote_display_topology::node_t node;
         node.id = id;
         node.label = label;
@@ -2986,10 +3031,10 @@ namespace confighttp {
 
     print_req(request);
 
-    nvhttp::erase_all_clients();
+    const bool persisted = nvhttp::erase_all_clients();
     proc::proc.terminate();
     nlohmann::json output_tree;
-    output_tree["status"] = true;
+    output_tree["status"] = persisted;
     send_response(response, output_tree);
   }
 
@@ -3050,6 +3095,46 @@ namespace confighttp {
 #endif
     // Build/release date provided by CMake (ISO 8601 when available)
     output_tree["release_date"] = PROJECT_RELEASE_DATE;
+    // UI status reads must never start a capture or probe an encoder.
+    bool probe_complete = false;
+    const auto encoder_caps = video::advertised_encoder_capabilities(false, &probe_complete);
+    output_tree["encoder_status"] = {
+      {"state", probe_complete ? "ready" : video::has_attempted_encoder_probe() ? "failed" : "unknown"},
+      {"h264", probe_complete},
+      {"hevc", probe_complete && encoder_caps.hevc_mode >= 2},
+      {"av1", probe_complete && encoder_caps.av1_mode >= 2},
+    };
+    output_tree["providers"]["steam"] = true;
+#if defined(__linux__)
+    output_tree["providers"]["lutris"] = true;
+    output_tree["providers"]["mangohud"] = true;
+    const char *session_role = std::getenv("VIBEPOLLO_SESSION_ROLE");
+    const std::string role = session_role ? session_role : "unknown";
+    output_tree["linux"] = {{"session_role", role == "desktop" || role == "greeter" ? role : "unknown"}};
+    const bool managed_active = platf::linux_capture_status::managed_event_capture_active();
+    output_tree["capture_status"] = {
+      {"configured_backend", config::video.capture},
+      {"observed_backend", managed_active ? "kms" : "unknown"},
+      {"managed_event_driven", managed_active},
+      {"virtual_display_configured", config::video.virtual_display_mode != config::video_t::virtual_display_mode_e::disabled},
+    };
+    const auto display_capabilities = platf::linux_display::backend().capabilities();
+    const bool virtual_capable = display_capabilities.independent_outputs;
+    const bool virtual_ready = display_capabilities.independent_outputs_ready;
+    output_tree["virtual_display"] = {
+      {"capable", virtual_capable},
+      {"ready", virtual_ready},
+      {"reason", virtual_ready ? "" : virtual_capable ? "session_or_output_unavailable" : "driver_or_outputs_unavailable"},
+      {"backend", display_capabilities.backend_name},
+      {"modes", {"per_client", "shared"}},
+      {"layouts", {"exclusive", "extended", "extended_primary", "extended_isolated", "extended_primary_isolated"}},
+      {"display_enumeration", true},
+      {"dynamic_modes", true},
+      {"hdr", "per_output"},
+      {"scale", true},
+      {"reset_persistence", true},
+    };
+#endif
 #if defined(_WIN32)
     try {
       const auto gpus = platf::enumerate_gpus();
@@ -4230,8 +4315,8 @@ namespace confighttp {
         return;
       }
 
-      std::ifstream in(validated_path, std::ios::binary);
-      if (!in) {
+      const auto image = proc::read_validated_app_image(validated_path);
+      if (!image) {
         BOOST_LOG(warning) << "Unable to read cover image file: " << validated_path;
         bad_request(response, request, "Unable to read cover image file");
         return;
@@ -4242,7 +4327,7 @@ namespace confighttp {
       headers.emplace("X-Frame-Options", "DENY");
       headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
 
-      response->write(SimpleWeb::StatusCode::success_ok, in, headers);
+      response->write(SimpleWeb::StatusCode::success_ok, *image, headers);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "GetCover: "sv << e.what();
       bad_request(response, request, e.what());
@@ -4403,6 +4488,7 @@ namespace confighttp {
     print_req(request);
 
     try {
+      std::lock_guard apps_lock {apps_file_mutex()};
       nlohmann::json output_tree;
       nlohmann::json new_apps = nlohmann::json::array();
       std::string file = file_handler::read_file(config::stream.file_apps.c_str());
@@ -5999,6 +6085,19 @@ namespace confighttp {
     register_api_route("^/api/vigembus/status$", "GET", getViGEmBusStatus);
     register_api_route("^/api/vigembus/install$", "POST", installViGEmBus);
     register_api_route("^/api/apps/purge_autosync$", "POST", purgeAutoSyncedApps);
+#if defined(_WIN32) || defined(__linux__)
+    register_api_route("^/api/frame-limiter/status$", "GET", getFrameLimiterStatus);
+#endif
+    register_api_route("^/api/steam/status$", "GET", getSteamStatus);
+    register_api_route("^/api/steam/games$", "GET", getSteamGames);
+    register_api_route("^/api/steam/force_sync$", "POST", postSteamForceSync);
+    register_api_route("^/api/steam/launch$", "POST", postSteamLaunch);
+#ifdef __linux__
+    register_api_route("^/api/lutris/status$", "GET", getLutrisStatus);
+    register_api_route("^/api/lutris/games$", "GET", getLutrisGames);
+    register_api_route("^/api/lutris/force_sync$", "POST", postLutrisForceSync);
+    register_api_route("^/api/lutris/launch$", "POST", postLutrisLaunch);
+#endif
 #ifdef _WIN32
     register_api_route("^/api/playnite/status$", "GET", getPlayniteStatus);
     register_api_route("^/api/rtss/status$", "GET", getRtssStatus);
