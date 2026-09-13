@@ -4,9 +4,11 @@
 
 - **Repository**: [gabrielcruzg3/Vibepollo](https://github.com/gabrielcruzg3/Vibepollo) (Fork of [Nonary/Vibepollo](https://github.com/Nonary/Vibepollo))
 - **Active Branch**: `dev/agy` (tracks `origin/dev/agy`)
-- **Current Version**: `1.19.0-beta.3-agy` (Upstream baseline: `1.19.0-beta.3` — **Latest Upstream Release**)
+- **Current Version**: `2.0.0-beta.2-agy` (Upstream baseline: `2.0.0-beta.2` — **Latest Upstream Release**)
 - **Published Releases**:
-  - [`1.19.0-beta.3-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-beta.3-agy) (Upstream `1.19.0-beta.3` — **Latest**)
+  - [`2.0.0-beta.2-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/2.0.0-beta.2-agy) (Upstream `2.0.0-beta.2` — **Latest**)
+  - [`2.0.0-beta.1-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/2.0.0-beta.1-agy) (Upstream `2.0.0-beta.1`)
+  - [`1.19.0-beta.3-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-beta.3-agy) (Upstream `1.19.0-beta.3`)
   - [`1.19.0-beta.2-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-beta.2-agy) (Upstream `1.19.0-beta.2`)
   - [`1.19.0-beta.1-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-beta.1-agy) (Upstream `1.19.0-beta.1`)
   - [`1.19.0-alpha.2-agy`](https://github.com/gabrielcruzg3/Vibepollo/releases/tag/1.19.0-alpha.2-agy) (Upstream `1.19.0-alpha.2`)
@@ -28,7 +30,9 @@ Our fork followed upstream release tags step-by-step using the naming convention
 | `1.19.0-alpha.2-agy` | `1.19.0-alpha.2` | Clean Merge | 36/36 Passed (100%) | **Published** |
 | `1.19.0-beta.1-agy` | `1.19.0-beta.1` | Clean Merge + Config Catalog Mapping | 36/36 Passed (100%) | **Published** |
 | `1.19.0-beta.2-agy` | `1.19.0-beta.2` | Clean Merge + Linux Lossless Header Fix + Config Catalog Mapping | 36/36 Passed (100%) | **Published** |
-| **`1.19.0-beta.3-agy`** | **`1.19.0-beta.3`** | **Clean Merge (Latest Upstream Tag Reached!)** | **36/36 Passed (100%)** | **Published (Latest)** |
+| `1.19.0-beta.3-agy` | `1.19.0-beta.3` | Clean Merge | 36/36 Passed (100%) | **Published** |
+| `2.0.0-beta.1-agy` | `2.0.0-beta.1` | Merged + Boost 1.90, capability sanitizer, artwork & test fixes | 121/121 Passed (100%) | **Packaged & Tagged** |
+| **`2.0.0-beta.2-agy`** | **`2.0.0-beta.2`** | **Merged + Capture queue stall fix + Reboot requirement** | **121/121 Passed (100%)** | **Packaged & Tagged (Latest)** |
 
 ---
 
@@ -51,6 +55,13 @@ Our fork followed upstream release tags step-by-step using the naming convention
 | [src/video.cpp](file:///home/g3/Vibepollo/src/video.cpp#L240-L245) | `encode_session_teardown_mutex` and `native_amf_lifecycle_gate` were nested inside an unclosed `#ifdef _WIN32` block. | Moved both declarations outside the Windows-only block so cross-platform teardown paths can access them. |
 | [tests/CMakeLists.txt](file:///home/g3/Vibepollo/tests/CMakeLists.txt#L183-L188) | Standalone test targets unconditionally linked Windows socket library `-lws2_32`. | Guarded socket linking under `if(WIN32)` via `${SUNSHINE_TEST_SOCKET_LIBRARIES}`. |
 | [tests/integration/test_locale_consistency.cpp](file:///home/g3/Vibepollo/tests/integration/test_locale_consistency.cpp#L23-L30) | Test failed when run from `build/` via CTest due to relative paths to `src/config.cpp` and locale assets. | Added `find_repository_root()` parent-traversal helper. |
+| [cmake/dependencies/Boost_Sunshine.cmake](file:///home/g3/Vibepollo/cmake/dependencies/Boost_Sunshine.cmake) & [tests/CMakeLists.txt](file:///home/g3/Vibepollo/tests/CMakeLists.txt) | System Boost 1.90.0 on Ubuntu failed `find_package(Boost CONFIG 1.89.0 ...)` with header-only components, causing duplicate alias targets | Query only compiled Boost components and alias header-only targets from `Boost::headers`. |
+| [src_assets/linux/misc/vibepollo-mangohud](file:///home/g3/Vibepollo/src_assets/linux/misc/vibepollo-mangohud#L57) | Dash `/bin/sh` does not support `[^...]` character set negation | Changed `*[^0-9.]*` to POSIX `*[!0-9.]*`. |
+| [src/platform/linux/capability_sanitizer.h](file:///home/g3/Vibepollo/src/platform/linux/capability_sanitizer.h) | Systemd user sessions pass `CAP_WAKE_ALARM` in inheritable set (`CapInh`), causing unprivileged check failure | Generalized unprivileged capability check to inspect empty P/E sets and drop inherited bits on any Linux desktop/session. |
+| [src/steam_artwork.cpp](file:///home/g3/Vibepollo/src/steam_artwork.cpp) & [cmake/compile_definitions/common.cmake](file:///home/g3/Vibepollo/cmake/compile_definitions/common.cmake) | Bundled FFmpeg lacks PNG/WebP/JPEG codecs; system missing `libwebp-dev`/`libjpeg-dev` | Pass through valid PNG directly; dynamically resolve WebP decoder from runtime `libwebp.so.7` via `dlopen`; link system `libpng` for encoding. |
+| [tests/unit/platform/linux/test_local_deploy.py](file:///home/g3/Vibepollo/tests/unit/platform/linux/test_local_deploy.py) & [test_linux_installer.sh](file:///home/g3/Vibepollo/tests/unit/platform/linux/test_linux_installer.sh) | User session umask `0002` created group-writable fixture directories failing security audits | Enforced standard `022` umask in test environments. |
+| [packaging/linux/steamos/tests/test-*.sh](file:///home/g3/Vibepollo/packaging/linux/steamos/tests/) | Payload dummy `/usr/bin/env` failed under multicall cargo uutils coreutils | Prefer standalone `gnuenv` binary when available or fallback to `env`. |
+| [tests/unit/platform/linux/test_session_controller.sh](file:///home/g3/Vibepollo/tests/unit/platform/linux/test_session_controller.sh) | 1-second timeout deadline raced with subsecond `SECONDS` increment under parallel test execution | Use 2-second deadline and 3-second boundary assertion to eliminate timing race. |
 
 ---
 
